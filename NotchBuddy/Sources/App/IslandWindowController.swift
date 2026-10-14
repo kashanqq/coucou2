@@ -15,6 +15,12 @@ final class IslandWindowController: NSWindowController {
     private var frameTimer: Timer?
     private var keyMonitor: Any?
     private var viewSubscription: AnyCancellable?
+    private var styleSubscription: AnyCancellable?
+
+    // Strip style: true while an externally opened island must ignore the cursor (see pollFrame)
+    private var stripHeld = false
+
+    private var isStrip: Bool { state.displayStyle == .strip }
 
     // Confused recovery timer (set by handleDizzy)
     private var confusedRecoveryTimer: DispatchWorkItem?
@@ -134,6 +140,13 @@ final class IslandWindowController: NSWindowController {
         startKeyMonitor()
         wireFSM()
 
+        fsm.collapseOnLeave = isStrip
+        styleSubscription = state.$displayStyle
+            .removeDuplicates()
+            .dropFirst()
+            .receive(on: DispatchQueue.main)   // @Published emits before the value is stored
+            .sink { [weak self] style in self?.applyDisplayStyle(style) }
+
         // Make panel key whenever the prompt/chat view becomes active
         // (nonactivatingPanel never auto-becomes key, but TextField needs it)
         viewSubscription = state.$view
@@ -189,6 +202,17 @@ final class IslandWindowController: NSWindowController {
         }
     }
 
+    /// Switch between notch island and thin strip at runtime: reset to the style's resting state.
+    private func applyDisplayStyle(_ style: DisplayStyle) {
+        fsm.collapseOnLeave = style == .strip
+        fsm.forceHidden()
+        if style == .strip {
+            setMode(.hidden)
+        } else {
+            state.syncMode()   // hidden → compact when there are tasks, as at launch
+        }
+    }
+
     // MARK: - 60 Hz polling loop
 
     private func startPolling() {
@@ -210,7 +234,14 @@ final class IslandWindowController: NSWindowController {
 
         // Island rect in panel coords
         let islandRect = panel.currentIslandFrame(nw: notchW, nh: notchH)
-        let inIsland   = islandRect.insetBy(dx: -6, dy: -6).contains(local)
+        var hoverRect  = islandRect.insetBy(dx: -6, dy: -6)
+        if isStrip && state.mode == .hidden {
+            // The bar must only react while the cursor is really on it: no slack below,
+            // extra slack above so the very top screen edge still counts.
+            hoverRect = CGRect(x: islandRect.minX - 6, y: islandRect.minY,
+                               width: islandRect.width + 12, height: islandRect.height + 6)
+        }
+        let inIsland = hoverRect.contains(local)
 
         // Toggle click-through
         let shouldAcceptMouse = inIsland || inAttachDrag || attachDragStart != nil
@@ -229,17 +260,31 @@ final class IslandWindowController: NSWindowController {
             AppState.shared.mousePosition = newPos
         }
 
+        // Strip style: an island opened by something other than the cursor (alert, menu, hotkey,
+        // drop) or being dragged from must ignore hover, otherwise leaving it would close an alert.
+        let held = isStrip && state.mode == .expanded
+            && (fsm.state == .hidden || fsm.state == .petit
+                || state.isPinned || inAttachDrag || attachDragStart != nil)
+        let releasedHold = stripHeld && !held
+        stripHeld = held
+
         // Feed FSM hover enter/leave
-        if inIsland && !wasInIsland {
-            guard !inAttachDrag else { wasInIsland = inIsland; return }
-            // If in coucou: tell greeting to stay open (tc → infinity)
-            if fsm.state == .coucou {
-                NotificationCenter.default.post(name: .greetingHover, object: nil)
+        if held {
+            // skip: FSM must not react while held
+        } else if releasedHold && !inIsland {
+            fsm.mouseLeft()   // cursor left while held (e.g. attach drag dropped elsewhere)
+        } else {
+            if inIsland && !wasInIsland {
+                guard !inAttachDrag else { wasInIsland = inIsland; return }
+                // If in coucou: tell greeting to stay open (tc → infinity)
+                if fsm.state == .coucou {
+                    NotificationCenter.default.post(name: .greetingHover, object: nil)
+                }
+                fsm.mouseEntered()
             }
-            fsm.mouseEntered()
-        }
-        if !inIsland && wasInIsland {
-            fsm.mouseLeft()
+            if !inIsland && wasInIsland {
+                fsm.mouseLeft()
+            }
         }
         wasInIsland = inIsland
 
@@ -335,9 +380,14 @@ final class IslandWindowController: NSWindowController {
     func collapse() {
         state.isPinned = false
         finishedPinTimer?.cancel()
-        // Tell FSM we're going to compact (from home)
-        if fsm.state == .home { fsm.mouseLeft() }
-        setMode(.compact)
+        if isStrip {
+            fsm.forceHidden()
+            setMode(.hidden)
+        } else {
+            // Tell FSM we're going to compact (from home)
+            if fsm.state == .home { fsm.mouseLeft() }
+            setMode(.compact)
+        }
         window?.resignKey()
     }
 
@@ -359,11 +409,13 @@ final class IslandWindowController: NSWindowController {
         NotificationCenter.default.addObserver(forName: .hookExpand, object: nil, queue: .main) { [weak self] note in
             guard let self, let view = note.object as? IslandView else { return }
             self.expand(to: view)
+            // Strip style: opened by an event, not by the cursor → stays until closed explicitly
+            if self.isStrip { self.fsm.detach() }
         }
 
         // Hook server compact reveal (non-alert work events: session start, tool use, etc.)
         NotificationCenter.default.addObserver(forName: .hookReveal, object: nil, queue: .main) { [weak self] _ in
-            guard let self else { return }
+            guard let self, !self.isStrip else { return }   // the strip only peeks on hover
             self.fsm.reveal()
         }
 
@@ -425,6 +477,7 @@ final class IslandWindowController: NSWindowController {
                     SoundEngine.shared.play("approve")
                     NotificationCenter.default.post(name: .triggerEmote, object: BotEmote.happy)
                     self.expand(to: .prompt)
+                    if self.isStrip { self.fsm.detach() }   // cursor is over another window; keep the chat open
                 }
                 #endif
             }
@@ -671,7 +724,9 @@ final class IslandWindowController: NSWindowController {
     // MARK: - Helpers
 
     func defaultView() -> IslandView {
-        state.tasks.isEmpty ? .empty : .overview
+        // A permission waiting for an answer is what opening the island is for.
+        if state.pendingApproval != nil { return .approval }
+        return state.tasks.isEmpty ? .empty : .overview
     }
 
     func baseMode() -> IslandMode {
@@ -727,7 +782,8 @@ final class IslandWindowController: NSWindowController {
         let panelH = window?.frame.height ?? 320
         let panelW = window?.frame.width  ?? 720
         let (islandW, fixedH) = islandSize(mode: s.mode, view: s.view,
-                                            progress: s.uploadProgress, nw: notchW, nh: notchH)
+                                            progress: s.uploadProgress, nw: notchW, nh: notchH,
+                                            style: s.displayStyle, stripW: s.stripStatusWidth)
         // Chat view resizes dynamically — must match IslandContainer.chatPromptHeight
         let islandH: CGFloat
         if s.mode == .expanded && s.view == .prompt {
@@ -740,7 +796,8 @@ final class IslandWindowController: NSWindowController {
         let islandMinX = (panelW - islandW) / 2
         let (cx, cy, diameter, _) = botPosition(mode: s.mode, view: s.view,
                                                   islandW: islandW, islandH: islandH,
-                                                  uploadProgress: s.uploadProgress)
+                                                  uploadProgress: s.uploadProgress,
+                                                  style: s.displayStyle)
         let radius = (diameter / 0.6) / 2
         // botPosition cy is from island TOP; panel AppKit coords have y=0 at bottom
         // island top in AppKit coords = panelH (island glued to top of panel/screen)
@@ -791,7 +848,8 @@ final class IslandPanel: NSPanel {
     func currentIslandFrame(nw: CGFloat, nh: CGFloat) -> CGRect {
         let s = AppState.shared
         let (w, fixedH) = islandSize(mode: s.mode, view: s.view,
-                                      progress: s.uploadProgress, nw: nw, nh: nh)
+                                      progress: s.uploadProgress, nw: nw, nh: nh,
+                                      style: s.displayStyle, stripW: s.stripStatusWidth)
         let h: CGFloat
         if s.mode == .expanded && s.view == .prompt {
             let base: CGFloat = 240
@@ -848,10 +906,13 @@ extension Notification.Name {
 func islandSize(mode: IslandMode, view: IslandView,
                 progress: Double = 0,
                 nw: CGFloat = IslandConst.notchWidth,
-                nh: CGFloat = IslandConst.notchHeight) -> (CGFloat, CGFloat) {
+                nh: CGFloat = IslandConst.notchHeight,
+                style: DisplayStyle = .notch,
+                stripW: CGFloat = 0) -> (CGFloat, CGFloat) {
     switch mode {
-    case .hidden:   return (nw, nh)
-    case .compact:  return (nw + 160, nh)
+    // The folded strip widens to fit its status line (AppState.stripStatusWidth).
+    case .hidden:   return style == .strip ? (max(nw, stripW), IslandConst.stripHeight) : (nw, nh)
+    case .compact:  return style == .strip ? (nw, IslandConst.stripPeekHeight) : (nw + 160, nh)
     case .expanded:
         let layout = IslandConst.viewLayouts[view]!
         return (IslandConst.expandedWidth, layout.height)

@@ -63,8 +63,13 @@ function handle(island: Island, update: IntegrationUpdate) {
       }
       Sound.play(event.success ? "finish" : "error");
       // Same as the Swift pollers: show the compact island so the badge is seen,
-      // but never steal the screen for a successful deploy.
-      island.reveal();
+      // but never steal the screen for a successful deploy. Folded into the thin
+      // bar, not even that: one line on the bar.
+      if (island.quietBar) {
+        island.notifyBar(`${task.name} · ${event.label}`, event.success ? "#34D399" : "#F4505E", 8000);
+      } else {
+        island.reveal();
+      }
 
       const existing = clearTimers.get(update.id);
       if (existing != null) window.clearTimeout(existing);

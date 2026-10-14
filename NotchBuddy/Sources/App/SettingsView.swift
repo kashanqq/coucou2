@@ -5,6 +5,10 @@ import AppKit
 struct SettingsView: View {
     @ObservedObject private var state = AppState.shared
     @State private var apiKey: String = KeychainStore.shared.get("anthropic-api-key") ?? ""
+    @State private var chatProvider: ChatProvider = ChatProvider.current
+    @State private var openAIBase: String  = ChatProvider.openAIBaseURL
+    @State private var openAIModel: String = ChatProvider.openAIModel
+    @State private var openAIKey: String   = KeychainStore.shared.get("openai-compat-key") ?? ""
     @State private var launchAtStartup: Bool = (SMAppService.mainApp.status == .enabled)
     @State private var statusMessage: String = ""
     @State private var showDiff: Bool = false
@@ -21,6 +25,11 @@ struct SettingsView: View {
     @State private var stripeKey: String    = KeychainStore.shared.get("stripe-api-key")  ?? ""
     @State private var calcomKey: String    = KeychainStore.shared.get("calcom-api-key")  ?? ""
     @State private var notionKey: String    = KeychainStore.shared.get("notion-api-key")  ?? ""
+
+    // Google Calendar OAuth client (the refresh token never comes near the UI)
+    @State private var gcalClientId: String     = KeychainStore.shared.get(GoogleCalendarService.clientIdKey) ?? ""
+    @State private var gcalClientSecret: String = KeychainStore.shared.get(GoogleCalendarService.clientSecretKey) ?? ""
+    @State private var gcalSigningIn = false
 
     // Hotkey
     @State private var hotkeyFlags: UInt    = AppState.shared.hotkeyFlags
@@ -47,15 +56,46 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 18) {
 
                 // MARK: API
-                GroupBox("Anthropic API") {
+                GroupBox("Chat provider") {
                     VStack(alignment: .leading, spacing: 8) {
-                        SecureField("API key (sk-ant-…)", text: $apiKey)
-                            .textFieldStyle(.roundedBorder)
-                        Button("Save") {
-                            KeychainStore.shared.set("anthropic-api-key", value: apiKey)
-                            statusMessage = "✓ Key saved."
+                        Picker("", selection: $chatProvider) {
+                            ForEach(ChatProvider.allCases) { p in Text(p.label).tag(p) }
                         }
-                        .buttonStyle(.borderedProminent)
+                        .labelsHidden()
+                        .onChange(of: chatProvider) { _, new in
+                            ChatProvider.current = new
+                            ClaudeService.shared.clearConversation()
+                        }
+
+                        switch chatProvider {
+                        case .anthropic:
+                            SecureField("API key (sk-ant-…)", text: $apiKey)
+                                .textFieldStyle(.roundedBorder)
+                            Button("Save") {
+                                KeychainStore.shared.set("anthropic-api-key", value: apiKey)
+                                statusMessage = "✓ Key saved."
+                            }
+                            .buttonStyle(.borderedProminent)
+                        case .openai:
+                            TextField("Base URL (https://api.deepseek.com)", text: $openAIBase)
+                                .textFieldStyle(.roundedBorder)
+                            TextField("Model (deepseek-chat)", text: $openAIModel)
+                                .textFieldStyle(.roundedBorder)
+                            SecureField("API key (empty for Ollama)", text: $openAIKey)
+                                .textFieldStyle(.roundedBorder)
+                            Text("No web search or PDF/image attachments with this provider.")
+                                .font(.system(size: 11)).foregroundColor(.secondary)
+                            Button("Save") {
+                                UserDefaults.standard.set(openAIBase, forKey: "openaiBaseURL")
+                                UserDefaults.standard.set(openAIModel, forKey: "openaiModel")
+                                KeychainStore.shared.set("openai-compat-key", value: openAIKey)
+                                statusMessage = "✓ Saved."
+                            }
+                            .buttonStyle(.borderedProminent)
+                        case .claudeCLI:
+                            Text("Uses the `claude` CLI installed and logged in on this Mac (your Pro/Max subscription). Not available in the App Store build.")
+                                .font(.system(size: 11)).foregroundColor(.secondary)
+                        }
                     }
                     .padding(6)
                 }
@@ -216,6 +256,73 @@ struct SettingsView: View {
 
                         Button("Save integrations") { saveIntegrations() }
                             .buttonStyle(.borderedProminent)
+                    }
+                    .padding(6)
+                }
+
+                // MARK: Google Calendar
+                GroupBox("Google Calendar") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(state.calendarConnected ? Color(hex: "#22C55E") : Color(hex: "#F4505E"))
+                                .frame(width: 8, height: 8)
+                            Text(state.calendarConnected ? "Connected — read-only" : "Not connected")
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                        Text("Shows your week in the island's calendar tab and opens the island five minutes before a meeting. Coucou talks to Google directly with your own OAuth client: at console.cloud.google.com enable the Google Calendar API, set up the OAuth consent screen (add yourself as a test user), then Credentials → Create credentials → OAuth client ID → Desktop app.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        TextField("Client ID  (…apps.googleusercontent.com)", text: $gcalClientId)
+                            .textFieldStyle(.roundedBorder)
+                        SecureField("Client secret  (GOCSPX-…)", text: $gcalClientSecret)
+                            .textFieldStyle(.roundedBorder)
+                        HStack(spacing: 10) {
+                            if state.calendarConnected {
+                                Button("Disconnect") {
+                                    Task { @MainActor in
+                                        await GoogleCalendarService.shared.disconnect()
+                                        statusMessage = "✓ Google Calendar disconnected, access revoked."
+                                    }
+                                }
+                                .buttonStyle(.bordered)
+                            } else {
+                                Button(gcalSigningIn ? "Waiting for your browser…" : "Save & connect…") {
+                                    connectCalendar()
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(gcalSigningIn || gcalClientId.trimmingCharacters(in: .whitespaces).isEmpty)
+                            }
+                            Button("Open Google Cloud console") {
+                                if let url = URL(string: "https://console.cloud.google.com/apis/credentials") {
+                                    NSWorkspace.shared.open(url)
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                        if let error = state.calendarError, state.calendarConnected {
+                            Text(error)
+                                .font(.system(size: 11))
+                                .foregroundColor(.red)
+                        }
+                    }
+                    .padding(6)
+                }
+
+                // MARK: Display
+                GroupBox("Display") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Picker("Style", selection: $state.displayStyle) {
+                            Text("Notch island").tag(DisplayStyle.notch)
+                            Text("Thin strip").tag(DisplayStyle.strip)
+                        }
+                        .pickerStyle(.segmented)
+                        Text(state.displayStyle == .strip
+                             ? "A thin black bar at the top of the screen. Hover to peek, click to open; it closes as soon as the cursor leaves."
+                             : "The island sits in the notch and stays visible for a while after the cursor leaves.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
                     }
                     .padding(6)
                 }
@@ -450,6 +557,23 @@ struct SettingsView: View {
         saveKey("calcom-api-key",  value: calcomKey)
         saveKey("notion-api-key",  value: notionKey)
         statusMessage = "✓ Integration keys saved."
+    }
+
+    /// Saves the OAuth client, then runs Google's sign-in in the browser.
+    private func connectCalendar() {
+        saveKey(GoogleCalendarService.clientIdKey, value: gcalClientId.trimmingCharacters(in: .whitespacesAndNewlines))
+        saveKey(GoogleCalendarService.clientSecretKey, value: gcalClientSecret.trimmingCharacters(in: .whitespacesAndNewlines))
+        gcalSigningIn = true
+        statusMessage = "Finish signing in in your browser…"
+        Task { @MainActor in
+            do {
+                try await GoogleCalendarService.shared.connect()
+                statusMessage = "✓ Google Calendar connected — your week is in the island's calendar tab."
+            } catch {
+                statusMessage = "❌ \(error.localizedDescription)"
+            }
+            gcalSigningIn = false
+        }
     }
 
     /// Saves non-empty value; removes only if key was previously set (explicit user clear).

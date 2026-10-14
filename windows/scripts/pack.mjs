@@ -39,3 +39,21 @@ const mb = (statSync(versioned).size / 1024 / 1024).toFixed(2);
 console.log(`\n  Installer ready — ${mb} MB\n`);
 console.log(`  ${versioned}`);
 console.log(`  ${rolling}\n`);
+
+// Portable build: the two exes side by side, no installer. The app finds
+// coucou-hook.exe next to itself and copies it to %LOCALAPPDATA%\Coucou\bin.
+const portableDir = join(outDir, "Coucou-portable");
+mkdirSync(portableDir, { recursive: true });
+for (const exe of ["coucou.exe", "coucou-hook.exe"]) {
+  try {
+    copyFileSync(join(root, "target", "release", exe), join(portableDir, exe));
+  } catch (err) {
+    if (err.code === "EBUSY" || err.code === "EPERM") {
+      console.error(`\n  Installer is ready, but ${exe} in the portable folder is running.`);
+      console.error("  Quit Coucou (tray icon → Quit) and run `npm run pack` again.\n");
+      process.exit(1);
+    }
+    throw err;
+  }
+}
+console.log(`  Portable folder: ${portableDir}\n`);

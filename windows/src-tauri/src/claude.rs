@@ -31,11 +31,37 @@ No markdown formatting (no **, no ##, no bullet dashes). Use plain text with lin
 pub struct Chat {
     /// Full multi-turn history, including tool_use / tool_result blocks.
     messages: Mutex<Vec<Value>>,
+    /// Plain role/content history for OpenAI-compatible providers.
+    plain: Mutex<Vec<Value>>,
+    /// Session id of the local `claude` CLI conversation.
+    cli_session: Mutex<Option<String>>,
+}
+
+/// Which backend answers the chat, resolved from the settings.
+pub enum Provider {
+    Anthropic { model: String },
+    OpenAi { base_url: String, model: String },
+    ClaudeCli,
+}
+
+impl Provider {
+    pub fn from_settings(s: &crate::settings::Settings) -> Self {
+        match s.provider.as_str() {
+            "openai" => Provider::OpenAi {
+                base_url: s.openai_base_url.clone(),
+                model: s.openai_model.clone(),
+            },
+            "claudeCli" => Provider::ClaudeCli,
+            _ => Provider::Anthropic { model: s.model.clone() },
+        }
+    }
 }
 
 impl Chat {
     pub fn reset(&self) {
         self.messages.lock().unwrap().clear();
+        self.plain.lock().unwrap().clear();
+        *self.cli_session.lock().unwrap() = None;
     }
 
     fn is_empty(&self) -> bool {
@@ -68,8 +94,219 @@ pub struct ChatReply {
     pub text: String,
 }
 
-/// One chat turn. Returns the assistant's text, or a message the island shows
-/// in the note view.
+pub async fn dispatch(
+    chat: &Chat,
+    provider: &Provider,
+    query: String,
+    context: Option<ChatContext>,
+) -> Result<ChatReply, String> {
+    match provider {
+        Provider::Anthropic { model } => send(chat, model, query, context).await,
+        Provider::OpenAi { base_url, model } => send_openai(chat, base_url, model, query, context).await,
+        Provider::ClaudeCli => send_cli(chat, query, context).await,
+    }
+}
+
+/// File / window context as plain text, for providers without Anthropic content
+/// blocks. Images and PDFs are not available there.
+fn plain_context(context: &Option<ChatContext>, with_path: bool) -> Option<String> {
+    match context.as_ref()? {
+        ChatContext::Window { app_name, title, url } => {
+            let mut text = format!("Context — App: {app_name}, Window: {title}");
+            if let Some(url) = url {
+                text.push_str(&format!(", URL: {url}"));
+            }
+            Some(text)
+        }
+        ChatContext::File { name, path } => {
+            if let Some(block) = file_block(path) {
+                if block.get("type").and_then(Value::as_str) == Some("text") {
+                    let t = block.get("text").and_then(Value::as_str).unwrap_or("");
+                    return Some(format!("File: {name}\n{t}"));
+                }
+            }
+            if with_path {
+                Some(format!("File: {path}"))
+            } else {
+                Some(format!("File: {name} (content not available with this provider)"))
+            }
+        }
+    }
+}
+
+// ── OpenAI-compatible providers (DeepSeek, OpenRouter, Groq, Ollama…) ─────────
+
+async fn send_openai(
+    chat: &Chat,
+    base_url: &str,
+    model: &str,
+    query: String,
+    context: Option<ChatContext>,
+) -> Result<ChatReply, String> {
+    let first = chat.plain.lock().unwrap().is_empty();
+    let mut user_text = query;
+    let mut image_url: Option<String> = None;
+    if first {
+        // Images go as an OpenAI `image_url` data URI (Gemini, GPT-4o, Ollama vision…).
+        if let Some(ChatContext::File { path, .. }) = &context {
+            if let Some(block) = file_block(path) {
+                if block.get("type").and_then(Value::as_str) == Some("image") {
+                    let media = block.pointer("/source/media_type").and_then(Value::as_str).unwrap_or("image/png");
+                    let data = block.pointer("/source/data").and_then(Value::as_str).unwrap_or("");
+                    image_url = Some(format!("data:{media};base64,{data}"));
+                }
+            }
+        }
+        if image_url.is_none() {
+            if let Some(ctx) = plain_context(&context, false) {
+                user_text = format!("{ctx}\n\n{user_text}");
+            }
+        }
+    }
+    let content = match image_url {
+        Some(url) => json!([
+            { "type": "image_url", "image_url": { "url": url } },
+            { "type": "text", "text": user_text },
+        ]),
+        None => json!(user_text),
+    };
+    chat.plain.lock().unwrap().push(json!({ "role": "user", "content": content }));
+
+    let result = openai_call(chat, base_url, model).await;
+    match result {
+        Ok(text) => {
+            chat.plain.lock().unwrap().push(json!({ "role": "assistant", "content": text }));
+            Ok(ChatReply { text })
+        }
+        Err(err) => {
+            chat.plain.lock().unwrap().pop();
+            Err(err)
+        }
+    }
+}
+
+/// `model` may be a comma-separated chain ("gemini-3.8-flash, gemini-3.7-flash"):
+/// when one is out of quota (429), overloaded (503) or out of credit (402), the
+/// next one answers the same request.
+async fn openai_call(chat: &Chat, base_url: &str, model: &str) -> Result<String, String> {
+    let url = format!("{}/chat/completions", base_url.trim().trim_end_matches('/'));
+    let system = SYSTEM_PROMPT.replace("You have web search access and ", "You ") + " You have no web access.";
+    let mut messages = vec![json!({ "role": "system", "content": system })];
+    messages.extend(chat.plain.lock().unwrap().clone());
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(90))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let key = secrets::get("openai-compat-key");
+
+    let models: Vec<&str> = model.split(',').map(str::trim).filter(|m| !m.is_empty()).collect();
+    let mut last_err = String::from("No model configured.");
+    for m in models {
+        let body = json!({ "model": m, "max_tokens": MAX_TOKENS, "messages": messages });
+        let mut req = client.post(&url).json(&body);
+        if let Some(key) = &key {
+            req = req.bearer_auth(key);
+        }
+        let response = req.send().await.map_err(|e| format!("Network error: {e}"))?;
+        let status = response.status();
+        let text = response.text().await.map_err(|e| e.to_string())?;
+        if !status.is_success() {
+            let detail = serde_json::from_str::<Value>(&text)
+                .ok()
+                .and_then(|v| v.pointer("/error/message").and_then(Value::as_str).map(str::to_string))
+                .unwrap_or_else(|| text.chars().take(200).collect());
+            last_err = format!("{m}: API {status}: {detail}");
+            if matches!(status.as_u16(), 402 | 429 | 503) {
+                continue; // quota / overload: try the next model in the chain
+            }
+            return Err(last_err);
+        }
+        let v: Value = serde_json::from_str(&text).map_err(|e| format!("Bad API response: {e}"))?;
+        let out = v
+            .pointer("/choices/0/message/content")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if out.is_empty() {
+            return Err("No response text.".into());
+        }
+        return Ok(out);
+    }
+    Err(last_err)
+}
+
+// ── Claude subscription through the local `claude` CLI ────────────────────────
+
+async fn send_cli(chat: &Chat, query: String, context: Option<ChatContext>) -> Result<ChatReply, String> {
+    let session = chat.cli_session.lock().unwrap().clone();
+    // Prompt goes through stdin: nothing user-controlled is ever put on a command line.
+    let mut prompt = query;
+    if session.is_none() {
+        if let Some(ctx) = plain_context(&context, true) {
+            prompt = format!("{ctx}\n\n{prompt}");
+        }
+        prompt = format!("{SYSTEM_PROMPT}\n\n{prompt}");
+    }
+
+    let (text, new_session) = tokio::task::spawn_blocking(move || run_claude_cli(&prompt, session.as_deref()))
+        .await
+        .map_err(|e| e.to_string())??;
+    if let Some(id) = new_session {
+        *chat.cli_session.lock().unwrap() = Some(id);
+    }
+    Ok(ChatReply { text })
+}
+
+fn run_claude_cli(prompt: &str, session: Option<&str>) -> Result<(String, Option<String>), String> {
+    use std::io::Write;
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    // `cmd /C` so claude.cmd (the npm shim) resolves like in a terminal.
+    let mut cmd = Command::new("cmd");
+    cmd.args(["/C", "claude", "-p", "--output-format", "json"]);
+    if let Some(id) = session {
+        // Session ids come from claude's own output; refuse anything unexpected.
+        if id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            cmd.args(["--resume", id]);
+        }
+    }
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .spawn()
+        .map_err(|e| format!("Cannot launch claude: {e}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(prompt.as_bytes());
+    }
+    let output = child.wait_with_output().map_err(|e| e.to_string())?;
+
+    let parsed: Option<Value> = serde_json::from_slice(&output.stdout).ok();
+    let Some(v) = parsed else {
+        let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if msg.is_empty() {
+            "claude CLI not found or not logged in — run `claude` once in a terminal.".into()
+        } else {
+            msg
+        });
+    };
+    let text = v.get("result").and_then(Value::as_str).unwrap_or("").trim().to_string();
+    if v.get("is_error").and_then(Value::as_bool) == Some(true) {
+        return Err(text);
+    }
+    if text.is_empty() {
+        return Err("No response text.".into());
+    }
+    Ok((text, v.get("session_id").and_then(Value::as_str).map(str::to_string)))
+}
+
+/// One chat turn against the Anthropic API. Returns the assistant's text, or a
+/// message the island shows in the note view.
 pub async fn send(
     chat: &Chat,
     model: &str,

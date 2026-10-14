@@ -233,6 +233,9 @@ final class HookServer: @unchecked Sendable {
     @MainActor
     private func expandIfNeeded(to view: IslandView) {
         let state = AppState.shared
+        // Strip style, folded into the bar: never open anything. The bar's own
+        // status line (AppState.stripStatus) says what Claude Code is doing.
+        if state.quietStrip { return }
         let isAlert: Bool
         switch view {
         case .approval, .finished, .error, .confused: isAlert = true
@@ -297,7 +300,11 @@ final class HookServer: @unchecked Sendable {
         state.isPinned = true
         SoundEngine.shared.play("approval")
 
-        // Approval always forces the island open — user must be able to respond
+        // Approval always forces the island open — user must be able to respond.
+        // Except on the folded strip: the request sits on the bar ("Needs
+        // permission · …") and hovering + clicking it opens straight on Allow /
+        // Deny (IslandWindowController.defaultView). isPinned then keeps it open
+        // until it is answered.
         state.focusId = "integration_claude"
         expandIfNeeded(to: .approval)
 

@@ -26,9 +26,18 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// Logical size of the full window — the largest island view, like the macOS panel.
 pub const PANEL_W: f64 = 720.0;
 pub const PANEL_H: f64 = 320.0;
+/// Window size when docked to a side edge: a narrow, tall column.
+pub const SIDE_PANEL_W: f64 = 340.0;
+pub const SIDE_PANEL_H: f64 = 560.0;
 /// Logical size of the invisible strip that wakes the island when it is hidden.
 pub const STRIP_W: f64 = 240.0;
 pub const STRIP_H: f64 = 6.0;
+/// Thin-bar look: the collapsed window is the 15 px bar the island shows when idle.
+pub const BAR_H: f64 = 15.0;
+/// Default and widest collapsed-bar window; the front end widens the bar to fit
+/// a Claude Code status line (`set_bar_width`).
+pub const BAR_WIN_W: f64 = 240.0;
+pub const BAR_WIN_MAX_W: f64 = 420.0;
 
 pub const WINDOW_LABEL: &str = "island";
 
@@ -68,6 +77,8 @@ pub struct PollGate {
     cv: Condvar,
     pub collapsed: AtomicBool,
     pub rect: Mutex<IslandRect>,
+    /// Width of the collapsed thin-bar window, logical px.
+    pub bar_w: Mutex<f64>,
     /// Mirrors the window flag so we only call into Win32 when it changes.
     ignoring: AtomicBool,
 }
@@ -79,6 +90,7 @@ impl PollGate {
             cv: Condvar::new(),
             collapsed: AtomicBool::new(true),
             rect: Mutex::new(IslandRect::default()),
+            bar_w: Mutex::new(BAR_WIN_W),
             ignoring: AtomicBool::new(false),
         }
     }
@@ -107,6 +119,23 @@ impl PollGate {
 
     fn is_active(&self) -> bool {
         *self.active.lock().unwrap()
+    }
+
+    /// Flips click-through, but only while the poll is live. Held under the same
+    /// lock as `set_active`, so once the window has collapsed to the wake strip —
+    /// which must always take the mouse — a late poll tick can no longer make it
+    /// click-through again. That used to happen whenever the cursor was still
+    /// moving at collapse time, leaving a bar that ignored hovers and clicks.
+    fn apply_click_through(&self, win: &WebviewWindow, accept: bool) {
+        let guard = self.active.lock().unwrap();
+        if !*guard {
+            return;
+        }
+        if self.ignoring.load(Ordering::Relaxed) == accept {
+            self.ignoring.store(!accept, Ordering::Relaxed);
+            let _ = win.set_ignore_cursor_events(!accept);
+        }
+        drop(guard);
     }
 }
 
@@ -211,11 +240,59 @@ pub fn apply_geometry(app: &AppHandle, pref: &str, collapsed: bool) {
     let mp = *m.position();
     let ms = *m.size();
 
-    let (lw, lh) = if collapsed { (STRIP_W, STRIP_H) } else { (PANEL_W, PANEL_H) };
+    let (dock, offset_y, bar) = app
+        .try_state::<crate::Shared>()
+        .map(|s| {
+            let s = s.settings.lock().unwrap();
+            let bar = s.island_style == "bar" && s.island_dock == "top";
+            (s.island_dock.clone(), s.island_offset_y, bar)
+        })
+        .unwrap_or_else(|| ("top".into(), 160.0, false));
+    let side = dock == "left" || dock == "right";
+    let bar_w = app
+        .try_state::<crate::Shared>()
+        .map(|s| *s.gate.bar_w.lock().unwrap())
+        .unwrap_or(BAR_WIN_W);
+    // The wake strip is horizontal on top, vertical on a side edge. In the thin-bar
+    // look the collapsed window is the visible bar itself.
+    let (lw, lh) = match (collapsed, side) {
+        (true, false) if bar => (bar_w, BAR_H),
+        (true, false) => (STRIP_W, STRIP_H),
+        (true, true) => (STRIP_H, STRIP_W),
+        (false, false) => (PANEL_W, PANEL_H),
+        (false, true) => (SIDE_PANEL_W, SIDE_PANEL_H),
+    };
     let pw = (lw * scale).round().max(1.0) as u32;
     let ph = (lh * scale).round().max(1.0) as u32;
-    let x = mp.x + (ms.width as i32 - pw as i32) / 2;
-    let y = mp.y;
+    let (align, offset) = app
+        .try_state::<crate::Shared>()
+        .map(|s| {
+            let s = s.settings.lock().unwrap();
+            (s.island_align.clone(), s.island_offset_x)
+        })
+        .unwrap_or_else(|| ("center".into(), 0.0));
+    // The bar must stay put when the window grows into the panel and back, so the
+    // narrow collapsed window is centred on where the panel would be.
+    let anchor_w = if bar && collapsed { (PANEL_W * scale).round() as i32 } else { pw as i32 };
+    let free = (ms.width as i32 - anchor_w).max(0);
+    let base = match align.as_str() {
+        "left" => 0,
+        "right" => free,
+        _ => free / 2,
+    };
+    // Keep the window on its monitor whatever the offset, or it becomes unreachable.
+    let rel = match dock.as_str() {
+        "left" => 0,
+        "right" => free,
+        _ => (base + (offset * scale).round() as i32).clamp(0, free),
+    };
+    let x = mp.x + rel + (anchor_w - pw as i32) / 2;
+    let y = if side {
+        let free_y = (ms.height as i32 - ph as i32).max(0);
+        mp.y + ((offset_y * scale).round() as i32).clamp(0, free_y)
+    } else {
+        mp.y
+    };
 
     let _ = win.set_size(PhysicalSize::new(pw, ph));
     let _ = win.set_position(PhysicalPosition::new(x, y));
@@ -284,6 +361,10 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
             let mut ticks: u32 = 0;
             while gate.is_active() {
                 std::thread::sleep(Duration::from_millis(16));
+                // Parked while we slept: this tick belongs to a window that is gone.
+                if !gate.is_active() {
+                    break;
+                }
 
                 // Monitors get plugged in, unplugged, rearranged and rescaled, and
                 // an island pinned to coordinates that no longer exist is an island
@@ -349,11 +430,7 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
                     && y >= 0.0
                     && y <= size.1;
 
-                let accept = on_island || dragging;
-                if gate.ignoring.load(Ordering::Relaxed) == accept {
-                    gate.ignoring.store(!accept, Ordering::Relaxed);
-                    let _ = win.set_ignore_cursor_events(!accept);
-                }
+                gate.apply_click_through(&win, on_island || dragging);
 
                 let _ = win.emit("cursor", CursorPayload { x, y });
             }

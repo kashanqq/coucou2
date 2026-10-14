@@ -1,5 +1,6 @@
 // Coucou for Windows — app wiring and the commands the island calls.
 
+mod calendar;
 mod claude;
 mod files;
 mod hooks;
@@ -63,7 +64,12 @@ fn boot(app: AppHandle, shared: State<Shared>) -> BootInfo {
 fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
     let (screen_changed, autostart_changed) = {
         let mut current = shared.settings.lock().unwrap();
-        let screen_changed = current.screen != settings.screen;
+        let screen_changed = current.screen != settings.screen
+            || current.island_align != settings.island_align
+            || current.island_offset_x != settings.island_offset_x
+            || current.island_dock != settings.island_dock
+            || current.island_offset_y != settings.island_offset_y
+            || current.island_style != settings.island_style;
         let autostart_changed = current.autostart != settings.autostart;
         *current = settings.clone();
         (screen_changed, autostart_changed)
@@ -92,11 +98,37 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
 fn set_collapsed(app: AppHandle, shared: State<Shared>, collapsed: bool) {
     let pref = shared.settings.lock().unwrap().screen.clone();
     shared.gate.collapsed.store(collapsed, Ordering::Relaxed);
+    // Park the poll *before* touching the flag: a tick still in flight would
+    // otherwise make the wake strip click-through again.
+    if collapsed {
+        shared.gate.set_active(false);
+    }
     island::apply_geometry(&app, &pref, collapsed);
     // The wake strip must always take the mouse, and a resize invalidates the flag.
     island::set_ignore_cursor(&app, false);
     shared.gate.forget_ignore_state();
-    shared.gate.set_active(!collapsed);
+    if !collapsed {
+        shared.gate.set_active(true);
+    }
+}
+
+/// Thin-bar look: the bar widens to fit a Claude Code status line. The collapsed
+/// window is the bar itself, so it follows — never wider than the bar, or it
+/// would swallow clicks meant for whatever is underneath.
+#[tauri::command]
+fn set_bar_width(app: AppHandle, shared: State<Shared>, width: f64) {
+    let w = width.clamp(150.0, island::BAR_WIN_MAX_W);
+    {
+        let mut current = shared.gate.bar_w.lock().unwrap();
+        if (*current - w).abs() < 0.5 {
+            return;
+        }
+        *current = w;
+    }
+    if shared.gate.collapsed.load(Ordering::Relaxed) {
+        let pref = shared.settings.lock().unwrap().screen.clone();
+        island::apply_geometry(&app, &pref, true);
+    }
 }
 
 /// The front end pushes the island shape; Rust decides click-through from it.
@@ -248,8 +280,11 @@ async fn chat_send(
     query: String,
     context: Option<ChatContext>,
 ) -> Result<ChatReply, String> {
-    let model = shared.settings.lock().unwrap().model.clone();
-    claude::send(&chat, &model, query, context).await
+    let cfg = {
+        let s = shared.settings.lock().unwrap();
+        claude::Provider::from_settings(&s)
+    };
+    claude::dispatch(&chat, &cfg, query, context).await
 }
 
 #[tauri::command]
@@ -271,12 +306,41 @@ fn secret_present(key: String) -> bool {
 
 #[tauri::command]
 fn secret_set(key: String, value: String) -> Result<(), String> {
+    if secrets::INTERNAL_KEYS.contains(&key.as_str()) {
+        return Err(format!("{key} is managed by Coucou"));
+    }
     secrets::set(&key, &value)
 }
 
 #[tauri::command]
 fn secret_clear(key: String) -> Result<(), String> {
+    if secrets::INTERNAL_KEYS.contains(&key.as_str()) {
+        return Err(format!("{key} is managed by Coucou"));
+    }
     secrets::clear(&key)
+}
+
+// ── Google Calendar ───────────────────────────────────────────────────────────
+
+/// Only ever called from the Connect button in the settings window.
+#[tauri::command]
+async fn calendar_connect(app: AppHandle) -> Result<(), String> {
+    calendar::connect(app).await
+}
+
+#[tauri::command]
+async fn calendar_disconnect(app: AppHandle) {
+    calendar::disconnect(&app).await;
+}
+
+#[tauri::command]
+async fn calendar_refresh(app: AppHandle) {
+    calendar::sync(&app).await;
+}
+
+#[tauri::command]
+fn calendar_status() -> calendar::CalendarStatus {
+    calendar::status()
 }
 
 /// Opens the configured n8n instance — the URL lives in the Credential Manager.
@@ -385,6 +449,7 @@ pub fn run() {
             save_settings,
             set_collapsed,
             set_island_rect,
+            set_bar_width,
             focus_window,
             reposition,
             open_url,
@@ -407,6 +472,10 @@ pub fn run() {
             open_n8n,
             open_settings_window,
             set_paused,
+            calendar_connect,
+            calendar_disconnect,
+            calendar_refresh,
+            calendar_status,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -427,6 +496,7 @@ pub fn run() {
             hooks::ensure_hook_exe(&handle);
             pipe::start(handle.clone());
             integrations::start(handle.clone());
+            calendar::start(handle.clone());
             Ok(())
         })
         .run(tauri::generate_context!())

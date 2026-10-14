@@ -21,6 +21,7 @@ export type IslandViewName =
   | "result"
   | "note"
   | "settings"
+  | "calendar"
   | "greeting";
 
 export type BotStateName =
@@ -53,10 +54,61 @@ export interface ViewLayout {
 export const PANEL_W = 720;
 export const PANEL_H = 320;
 
+/** Docked to a side edge the window is a narrow, tall column (mirrors island.rs). */
+export const SIDE_PANEL_W = 340;
+export const SIDE_PANEL_H = 560;
+/** Expanded island width in the side column. */
+export const SIDE_W = 310;
+
 // No notch on a PC: these are the hidden/compact sizes from docs/SPEC.md.
 export const NOTCH_W = 184;
 export const NOTCH_H = 32;
 export const COMPACT_W = 288; // NOTCH_W + 104
+
+/** Look preferences pushed from the settings: a floating, narrower "cloud". */
+export const layoutPrefs: {
+  gap: number;
+  compactW: number;
+  dock: "top" | "left" | "right";
+  /** "Thin bar" look: a 15 px black bar stays on the top edge instead of vanishing. */
+  bar: boolean;
+  /** Width the bar needs for its Claude Code status line; 0 when there is none. */
+  barStatusW: number;
+} = { gap: 8, compactW: 200, dock: "top", bar: false, barStatusW: 0 };
+
+/** Height of the thin bar, and how wide it gets (as wide as the compact island). */
+export const BAR_H = 15;
+export const BAR_MAX_W = 240;
+/** With a status line the bar grows to fit it, up to this (mirrors BAR_WIN_MAX_W). */
+export const BAR_STATUS_MAX_W = 420;
+export const barWidth = () =>
+  Math.max(Math.min(layoutPrefs.compactW, BAR_MAX_W), layoutPrefs.barStatusW);
+
+/** Compact island when docked to a side edge: a vertical pill. */
+export const VERT_W = 36;
+export const VERT_H = 96;
+
+export const isSideDock = () => layoutPrefs.dock !== "top";
+
+/** Left edge of the island inside the window. */
+export function islandX(w: number): number {
+  switch (layoutPrefs.dock) {
+    case "left": return layoutPrefs.gap;
+    case "right": return SIDE_PANEL_W - w - layoutPrefs.gap;
+    // The bar lives in a window that shrinks to the bar itself (see island.rs), so
+    // centre on the real width rather than the full panel's.
+    default: return ((layoutPrefs.bar ? windowWidth() : PANEL_W) - w) / 2;
+  }
+}
+
+function windowWidth(): number {
+  return document.documentElement.clientWidth || PANEL_W;
+}
+
+/** Top edge of the island inside the window. */
+export function islandY(): number {
+  return isSideDock() ? 0 : layoutPrefs.gap;
+}
 export const EXPANDED_W = 640;
 
 export const ROUNDED_CORNER = 14; // hidden / compact
@@ -85,6 +137,7 @@ export const VIEW_LAYOUTS: Record<IslandViewName, ViewLayout> = {
   result: { height: 160, botX: 52, botY: null, botDiameter: 44, agentMode: "column" },
   note: { height: 160, botX: 60, botY: null, botDiameter: 50, agentMode: "column" },
   settings: { height: 160, botX: 54, botY: null, botDiameter: 46, agentMode: "none" },
+  calendar: { height: 260, botX: 52, botY: null, botDiameter: 44, agentMode: "none" },
   greeting: { height: 150, botX: 320, botY: 90, botDiameter: 0, agentMode: "none" },
 };
 
@@ -97,6 +150,18 @@ export function chatPromptHeight(messageCount: number): number {
   return Math.min(300, 240 + messageCount * 40);
 }
 
+/** Heights of the vertical (side-docked) views: header 42 + Mochi zone 68 + card. */
+const SIDE_HEIGHTS: Record<IslandViewName, number> = {
+  overview: 350, empty: 240, approval: 320, question: 270, error: 310, finished: 280,
+  confused: 220, upload: 250, uploading: 230, choose: 280, mail: 220, prompt: 330,
+  searching: 210, result: 210, note: 230, settings: 320, calendar: 420, greeting: 130,
+};
+
+function sideHeight(view: IslandViewName, chatCount: number): number {
+  if (view === "prompt") return Math.min(SIDE_PANEL_H - 40, SIDE_HEIGHTS.prompt + chatCount * 40);
+  return SIDE_HEIGHTS[view];
+}
+
 export function islandSize(
   mode: IslandMode,
   view: IslandViewName,
@@ -106,10 +171,12 @@ export function islandSize(
     case "hidden":
       // No notch to hide inside on a PC: the island retracts to zero height and
       // slides into the top edge of the screen instead of sitting there as a bar.
-      return { w: NOTCH_W, h: 0 };
+      if (layoutPrefs.bar) return { w: barWidth(), h: BAR_H };
+      return isSideDock() ? { w: 0, h: VERT_H } : { w: NOTCH_W, h: 0 };
     case "compact":
-      return { w: COMPACT_W, h: NOTCH_H };
+      return isSideDock() ? { w: VERT_W, h: VERT_H } : { w: layoutPrefs.compactW, h: NOTCH_H };
     case "expanded": {
+      if (isSideDock()) return { w: SIDE_W, h: sideHeight(view, chatCount) };
       const h = view === "prompt" ? chatPromptHeight(chatCount) : VIEW_LAYOUTS[view].height;
       return { w: EXPANDED_W, h };
     }
@@ -132,10 +199,20 @@ export function botPosition(
 ): BotPlacement {
   switch (mode) {
     case "hidden":
-      return { cx: 46, cy: 16, diameter: 6, opacity: 0 };
+      return isSideDock()
+        ? { cx: VERT_W / 2, cy: 24, diameter: 6, opacity: 0 }
+        : { cx: 46, cy: 16, diameter: 6, opacity: 0 };
     case "compact":
-      return { cx: 40, cy: 16, diameter: 20, opacity: 1 };
+      return isSideDock()
+        ? { cx: VERT_W / 2, cy: 24, diameter: 20, opacity: 1 }
+        : { cx: 40, cy: 16, diameter: 20, opacity: 1 };
     case "expanded": {
+      if (isSideDock()) {
+        // Mochi sits centred above the card in the vertical column.
+        return view === "greeting"
+          ? { cx: SIDE_W / 2, cy: 70, diameter: 0, opacity: 1 }
+          : { cx: SIDE_W / 2, cy: 76, diameter: 50, opacity: 1 };
+      }
       const layout = VIEW_LAYOUTS[view];
       if (view === "uploading") {
         return {

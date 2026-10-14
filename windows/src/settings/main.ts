@@ -3,7 +3,7 @@
 // integrations land here too in a later stage.
 
 import "./settings.css";
-import { Bridge, onEvent, type HookStatus } from "../core/bridge";
+import { Bridge, onEvent, type CalendarStatus, type CalendarUpdate, type HookStatus } from "../core/bridge";
 import { DEFAULT_SETTINGS, type Settings } from "../core/state";
 import { h, clear } from "../views/dom";
 
@@ -243,14 +243,80 @@ function apiSection(hasKey: boolean): HTMLElement {
 
   clearBtn.style.display = hasKey ? "" : "none";
 
-  return h(
-    "section",
-    {},
-    h("h2", {}, dot, h("span", { text: "Claude" })),
+  // ── Provider choice ──
+  const provider = h("select", {}) as HTMLSelectElement;
+  for (const [id, label] of [
+    ["anthropic", "Anthropic API"],
+    ["openai", "OpenAI-compatible (DeepSeek, Ollama, OpenRouter…)"],
+    ["claudeCli", "Claude subscription (local claude CLI)"],
+  ]) provider.append(h("option", { value: id, text: label }));
+  provider.value = settings.provider;
+
+  const anthropicBlock = h("div", {},
     state,
     h("div", { class: "row" }, h("label", { text: "API key" }), field, saveBtn, clearBtn),
     h("div", { class: "row" }, h("label", { text: "Model" }), model),
     feedback,
+  );
+
+  const baseUrl = h("input", { type: "text", value: settings.openaiBaseUrl, style: "flex:1 1 auto;min-width:0", spellcheck: "false" }) as HTMLInputElement;
+  const oaModel = h("input", { type: "text", value: settings.openaiModel, style: "flex:1 1 auto;min-width:0", spellcheck: "false" }) as HTMLInputElement;
+  const oaKey = h("input", { type: "password", placeholder: "API key (empty for Ollama)", style: "flex:1 1 auto;min-width:0", autocomplete: "off", spellcheck: "false" }) as HTMLInputElement;
+  const oaSave = h("button", { class: "primary", text: "Save" });
+  const oaFeedback = h("div", {});
+  void Bridge.secretPresent("openai-compat-key").then((p) => {
+    if (p) oaKey.placeholder = "••••••••••••  (stored)";
+  });
+  oaSave.addEventListener("click", async () => {
+    clear(oaFeedback);
+    try {
+      settings.openaiBaseUrl = baseUrl.value.trim();
+      settings.openaiModel = oaModel.value.trim();
+      await save();
+      const k = oaKey.value.trim();
+      if (k) {
+        await Bridge.secretSet("openai-compat-key", k);
+        oaKey.value = "";
+        oaKey.placeholder = "••••••••••••  (stored)";
+      }
+      oaFeedback.append(h("div", { class: "notice ok", text: "Saved." }));
+    } catch (err) {
+      oaFeedback.append(h("div", { class: "notice err", text: `Could not save: ${String(err)}` }));
+    }
+  });
+  const openaiBlock = h("div", {},
+    h("div", { class: "hint", text: "No web search or PDF with this provider. Images work if the model supports vision. Model accepts a fallback chain: a, b, c — the next one is used when a model hits its limit." }),
+    h("div", { class: "row" }, h("label", { text: "Base URL" }), baseUrl),
+    h("div", { class: "row" }, h("label", { text: "Model" }), oaModel),
+    h("div", { class: "row" }, h("label", { text: "API key" }), oaKey, oaSave),
+    oaFeedback,
+  );
+
+  const cliBlock = h("div", {},
+    h("div", { class: "hint", text: "Uses the claude CLI installed and logged in on this PC (your Pro/Max subscription). Run `claude` once in a terminal to log in." }),
+  );
+
+  function showProvider() {
+    anthropicBlock.style.display = settings.provider === "anthropic" ? "" : "none";
+    openaiBlock.style.display = settings.provider === "openai" ? "" : "none";
+    cliBlock.style.display = settings.provider === "claudeCli" ? "" : "none";
+  }
+  provider.addEventListener("change", () => {
+    settings.provider = provider.value as Settings["provider"];
+    showProvider();
+    void save();
+    void Bridge.chatReset();
+  });
+  showProvider();
+
+  return h(
+    "section",
+    {},
+    h("h2", {}, dot, h("span", { text: "Chat" })),
+    h("div", { class: "row" }, h("label", { text: "Provider" }), provider),
+    anthropicBlock,
+    openaiBlock,
+    cliBlock,
   );
 }
 
@@ -358,6 +424,99 @@ function integrationsSection(present: Record<string, boolean>): HTMLElement {
   return h("section", {}, h("h2", {}, h("span", { text: "Integrations" })), note, list);
 }
 
+// ── Google Calendar section ───────────────────────────────────────────────────
+
+function calendarSection(initial: CalendarStatus, secretStored: boolean): HTMLElement {
+  const status = { ...initial };
+  const head = h("h2", {});
+  const body = h("div", { style: "display:flex;flex-direction:column;gap:10px" });
+  const feedback = h("div", {});
+
+  const field = (key: string, label: string, placeholder: string, secret: boolean, stored: boolean) => {
+    const input = h("input", {
+      type: secret ? "password" : "text",
+      placeholder: stored ? "••••••••  (stored)" : placeholder,
+      autocomplete: "off",
+      spellcheck: "false",
+      style: "flex:1 1 auto;min-width:0",
+    }) as HTMLInputElement;
+    const saveBtn = h("button", { text: "Save" });
+    const dotEl = statusDot(stored);
+    saveBtn.addEventListener("click", async () => {
+      const value = input.value.trim();
+      try {
+        await Bridge.secretSet(key, value);
+        input.value = "";
+        input.placeholder = value ? "••••••••  (stored)" : placeholder;
+        dotEl.style.background = value ? "#22c55e" : "#f4505e";
+        await refresh();
+      } catch {
+        dotEl.style.background = "#f5a524";
+      }
+    });
+    return h("div", { class: "row" },
+      h("label", { style: "min-width:104px", text: label }), input, saveBtn, dotEl);
+  };
+
+  const connectBtn = h("button", { class: "primary" });
+  connectBtn.addEventListener("click", async () => {
+    clear(feedback);
+    if (status.connected) {
+      connectBtn.disabled = true;
+      await Bridge.calendarDisconnect();
+      feedback.append(h("div", { class: "notice ok", text: "Disconnected, and access revoked at Google." }));
+      await refresh();
+      return;
+    }
+    connectBtn.disabled = true;
+    connectBtn.textContent = "Waiting for your browser…";
+    try {
+      await Bridge.calendarConnect();
+      feedback.append(h("div", { class: "notice ok", text: "Connected. Your week is in the island's calendar tab." }));
+    } catch (err) {
+      feedback.append(h("div", { class: "notice err", text: String(err).replace(/^Error:\s*/, "") }));
+    }
+    await refresh();
+  });
+
+  async function refresh() {
+    Object.assign(status, (await Bridge.calendarStatus()) ?? {});
+    clear(head);
+    head.append(statusDot(status.connected), h("span", { text: "Google Calendar" }));
+    connectBtn.disabled = !status.clientReady || status.signingIn;
+    connectBtn.className = status.connected ? "danger" : "primary";
+    connectBtn.textContent = status.connected
+      ? "Disconnect"
+      : status.signingIn ? "Waiting for your browser…" : "Connect…";
+    connectBtn.title = status.clientReady ? "" : "Save the client ID first.";
+  }
+
+  body.append(
+    h("div", {
+      class: "hint",
+      text: "Read-only: Coucou shows your week and opens the island five minutes before a meeting. "
+        + "It talks to Google directly with your own OAuth client — create one at console.cloud.google.com: "
+        + "enable the Google Calendar API, set up the OAuth consent screen (add yourself as a test user), "
+        + "then Credentials → Create credentials → OAuth client ID → Desktop app.",
+    }),
+    field("gcal-client-id", "Client ID", "…apps.googleusercontent.com", false, initial.clientReady),
+    field("gcal-client-secret", "Client secret", "GOCSPX-…", true, secretStored),
+    h("div", { class: "row" },
+      connectBtn,
+      h("button", {
+        text: "Open Google Cloud console",
+        onclick: () => void Bridge.openUrl("https://console.cloud.google.com/apis/credentials"),
+      }),
+    ),
+    feedback,
+  );
+
+  // Rust reports every sync and sign-out; keep the dot honest.
+  void onEvent<CalendarUpdate>("calendar", () => void refresh());
+  void refresh();
+  return h("section", {}, head, body);
+}
+
 // ── General section ───────────────────────────────────────────────────────────
 
 function generalSection(): HTMLElement {
@@ -392,10 +551,118 @@ function generalSection(): HTMLElement {
     void save();
   });
 
+  const align = h("select", {}) as HTMLSelectElement;
+  align.append(
+    h("option", { value: "center", text: "Center" }),
+    h("option", { value: "left", text: "Left" }),
+    h("option", { value: "right", text: "Right" }),
+  );
+  align.value = settings.islandAlign;
+  align.addEventListener("change", () => {
+    settings.islandAlign = align.value as Settings["islandAlign"];
+    void save();
+  });
+
+  const offsetX = h("input", {
+    type: "number", min: "-2000", max: "2000", step: "10",
+    value: String(Math.round(settings.islandOffsetX)),
+    style: "width:80px",
+  }) as HTMLInputElement;
+  offsetX.addEventListener("change", () => {
+    settings.islandOffsetX = Math.max(-2000, Math.min(2000, Number(offsetX.value) || 0));
+    offsetX.value = String(settings.islandOffsetX);
+    void save();
+  });
+
+  const wake = h("input", {
+    type: "number", min: "0", max: "2000", step: "50",
+    value: String(Math.round(settings.wakeDelay)),
+    style: "width:80px",
+  }) as HTMLInputElement;
+  wake.addEventListener("change", () => {
+    settings.wakeDelay = Math.max(0, Math.min(2000, Number(wake.value) || 0));
+    wake.value = String(settings.wakeDelay);
+    void save();
+  });
+
+  const num = (v: number, min: number, max: number, step: number, apply: (n: number) => void) => {
+    const el = h("input", { type: "number", min: String(min), max: String(max), step: String(step), value: String(Math.round(v)), style: "width:80px" }) as HTMLInputElement;
+    el.addEventListener("change", () => {
+      const n = Math.max(min, Math.min(max, Number(el.value) || 0));
+      el.value = String(n);
+      apply(n);
+      void save();
+    });
+    return el;
+  };
+  const gapInput = num(settings.islandGap, 0, 16, 1, (n) => { settings.islandGap = n; });
+  const widthInput = num(settings.compactWidth, 150, 288, 10, (n) => { settings.compactWidth = n; });
+
+  const dock = h("select", {}) as HTMLSelectElement;
+  dock.append(
+    h("option", { value: "top", text: "Top edge" }),
+    h("option", { value: "left", text: "Left edge (vertical)" }),
+    h("option", { value: "right", text: "Right edge (vertical)" }),
+  );
+  dock.value = settings.islandDock;
+  dock.addEventListener("change", () => {
+    settings.islandDock = dock.value as Settings["islandDock"];
+    void save();
+  });
+  const offsetY = num(settings.islandOffsetY, 0, 2000, 10, (n) => { settings.islandOffsetY = n; });
+
+  const style = h("select", {}) as HTMLSelectElement;
+  style.append(
+    h("option", { value: "island", text: "Island (appears on demand)" }),
+    h("option", { value: "bar", text: "Thin bar (always there)" }),
+  );
+  style.value = settings.islandStyle;
+  style.addEventListener("change", () => {
+    settings.islandStyle = style.value as Settings["islandStyle"];
+    void save();
+  });
+
   return h(
     "section",
     {},
     h("h2", {}, h("span", { text: "General" })),
+    h("div", { class: "row" },
+      h("label", { text: "Look" }),
+      style,
+      h("span", { class: "hint", text: "bar: a 15 px black strip on the top edge — hover to peek, click to open, leave and it folds back (top edge only)" }),
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Dock to" }),
+      dock,
+      offsetY,
+      h("span", { class: "hint", text: "px from the top (side edges) — keeps it off the browser tabs" }),
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Cloud look" }),
+      gapInput,
+      h("span", { class: "hint", text: "px gap from the top edge (0 = glued)" }),
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Compact width" }),
+      widthInput,
+      h("span", { class: "hint", text: "px (150–288)" }),
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Island position" }),
+      align,
+      offsetX,
+      h("span", { class: "hint", text: "px shift (+ right) — move it off your browser tabs" }),
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Wake delay" }),
+      wake,
+      h("span", { class: "hint", text: "ms hovering the top edge before the island peeks (0 = instant)" }),
+    ),
+    h("div", { class: "row" },
+      h("label", { text: "Expand on hover" }),
+      toggle(settings.hoverExpand, (v) => { settings.hoverExpand = v; void save(); }),
+      h("span", { class: "hint", text: "open on hover, close as soon as the cursor leaves (off = open on click)" }),
+    ),
     h("div", { class: "row" },
       h("label", { text: "Sound" }),
       toggle(settings.soundEnabled, (v) => { settings.soundEnabled = v; void save(); }),
@@ -438,12 +705,17 @@ async function main() {
   const present: Record<string, boolean> = {};
   for (const k of keys) present[k] = (await Bridge.secretPresent(k)) ?? false;
 
+  const calendarStatus = (await Bridge.calendarStatus()) ?? {
+    connected: false, clientReady: false, signingIn: false,
+  };
+
   clear(root);
   root.append(
     h("h1", {}, h("span", { text: "Coucou" }), h("span", { class: "version", text: version })),
     claudeSection(status),
     apiSection(hasKey),
     integrationsSection(present),
+    calendarSection(calendarStatus, (await Bridge.secretPresent("gcal-client-secret")) ?? false),
     generalSection(),
     h("div", {
       class: "hint",

@@ -242,6 +242,9 @@ final class N8nPoller: @unchecked Sendable {
             state.tasks[idx].pillBadge = success ? .finished : .error
         }
         SoundEngine.shared.play(success ? "finish" : "error")
+        if state.quietStrip {
+            state.notifyStrip("n8n · \(name)", color: success ? "#34D399" : "#F4505E", for: 8)
+        }
 
         // Auto-clear after 60s (user needs time to read detail)
         DispatchQueue.main.asyncAfter(deadline: .now() + 60) {

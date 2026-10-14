@@ -45,6 +45,8 @@ installs for the current user only — no admin prompt.
 | Rest the pointer on Mochi for two seconds | Hearts |
 | Drag a file onto the island | Mochi turns into a box, swallows it, then offers to answer questions about it |
 | `Esc` | Closes the island |
+| Calendar tab (next to the chat) | Your week from Google Calendar, Join buttons for Meet links; the island opens 5 minutes before a meeting. Connect it in Settings → Google Calendar |
+| Settings → Look → *Thin bar* | A 15 px black bar stays on the top edge. Hover: it peeks. Click: it opens. Move the cursor away: it folds back into the bar. While folded, nothing opens it on its own — Claude Code, integrations and calendar reminders just write one line on the bar ("Needs permission · …", "Vercel · my-app", "In 5 min · Standup"…) |
 | Tray icon | Open, Settings…, Pause, Quit |
 
 Everything else happens on its own: a Claude Code permission request opens the

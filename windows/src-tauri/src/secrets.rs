@@ -8,6 +8,7 @@ const SERVICE: &str = "fr.louisraille.coucou";
 /// Every key Coucou may store. Anything outside this list is refused.
 pub const KNOWN_KEYS: &[&str] = &[
     "anthropic-api-key",
+    "openai-compat-key",
     "n8n-url",
     "n8n-api-key",
     "vercel-token",
@@ -16,7 +17,13 @@ pub const KNOWN_KEYS: &[&str] = &[
     "resend-api-key",
     "notion-api-key",
     "calcom-api-key",
+    "gcal-client-id",
+    "gcal-client-secret",
+    "gcal-refresh-token",
 ];
+
+/// Keys only Rust may write: the front end can ask whether they exist, nothing more.
+pub const INTERNAL_KEYS: &[&str] = &["gcal-refresh-token"];
 
 fn entry(key: &str) -> Option<Entry> {
     if !KNOWN_KEYS.contains(&key) {

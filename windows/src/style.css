@@ -63,12 +63,64 @@ body {
   background: transparent;
 }
 
+/* Thin-bar look: the strip is exactly the visible bar (size set from island.ts)
+   and has to sit above it, or the bar would swallow the hover. */
+#wake-strip[data-bar] {
+  z-index: 10;
+}
+
+/* Thin-bar look: one line of Claude Code status written on the folded bar. */
+#bar-status {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 12px;
+  font: 500 10px var(--font);
+  line-height: 15px;
+  color: var(--dim);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.18s ease-out;
+}
+
+#bar-status.on {
+  opacity: 1;
+  transition-delay: 0.12s;
+}
+
+#bar-status i {
+  flex: 0 0 auto;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+}
+
+#bar-status span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#wake-strip[data-dock="left"],
+#wake-strip[data-dock="right"] {
+  top: 0;
+  transform: none;
+  width: 6px;
+  height: 240px;
+}
+#wake-strip[data-dock="left"] { left: 0; }
+#wake-strip[data-dock="right"] { left: auto; right: 0; }
+
 /* ── Island ─────────────────────────────────────────────────────────────── */
 
 #island {
   position: absolute;
   top: 0;
-  left: 50%;
+  left: 0;
   background: #000;
   border-radius: 0 0 14px 14px;
   overflow: visible;
@@ -737,6 +789,169 @@ input[type="range"]::-webkit-slider-thumb {
   white-space: nowrap;
 }
 
+/* ── Calendar ───────────────────────────────────────────────────────────── */
+
+.cal-body {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px 10px 84px;
+}
+
+.cal-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font: 400 11.5px var(--font);
+  color: var(--dim-3);
+  flex: 0 0 auto;
+}
+
+.cal-head .grow { flex: 1 1 auto; }
+
+.cal-name {
+  font: 600 12px var(--font);
+  color: var(--dim-2);
+}
+
+.cal-icon {
+  width: 20px;
+  height: 20px;
+  color: var(--dim-2);
+}
+
+.cal-icon:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: var(--ink);
+}
+
+.cal-icon.spin svg {
+  animation: cal-spin 0.8s linear infinite;
+}
+
+@keyframes cal-spin {
+  to { transform: rotate(360deg); }
+}
+
+.cal-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-right: 2px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+.cal-day {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 6px 0 3px;
+  background: var(--card);
+  font: 600 10.5px var(--font);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--dim-3);
+}
+
+.cal-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 34px;
+  padding: 4px 8px 4px 6px;
+  border-radius: 10px;
+  transition: background 0.12s ease-out;
+}
+
+.cal-row:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.cal-row.live {
+  background: rgba(66, 133, 244, 0.14);
+}
+
+.cal-row.past {
+  opacity: 0.42;
+}
+
+.cal-bar {
+  align-self: stretch;
+  width: 3px;
+  border-radius: 2px;
+  flex: 0 0 auto;
+}
+
+.cal-time {
+  flex: 0 0 auto;
+  min-width: 92px;
+  font: 500 11.5px var(--font);
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.cal-info {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.cal-title,
+.cal-loc {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cal-title {
+  font: 500 13px var(--font);
+  color: var(--ink);
+}
+
+.cal-loc {
+  font: 400 11px var(--font);
+  color: var(--dim-3);
+}
+
+.cal-badge {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #4285f4;
+  color: #fff;
+  font: 600 10px var(--font);
+}
+
+.cal-badge.soon {
+  background: rgba(245, 165, 36, 0.2);
+  color: var(--amber);
+}
+
+.btn.cal-join {
+  flex: 0 0 auto;
+  padding: 4px 11px;
+  font-size: 11.5px;
+}
+
+.cal-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 18px 4px;
+}
+
+.cal-error {
+  padding: 4px 2px;
+}
+
+html[data-side] .cal-body { padding: 10px 10px 10px 10px; }
+html[data-side] .cal-time { min-width: 0; font-size: 10.5px; }
+html[data-side] .cal-row { flex-wrap: wrap; row-gap: 0; }
+
 /* ── Chat (prompt view) ─────────────────────────────────────────────────── */
 
 .chat-card {
@@ -1358,3 +1573,42 @@ input[type="range"]::-webkit-slider-thumb {
 .int-card.detail {
   padding-top: 8px;
 }
+
+/* ── Vertical (side-docked) layout ──────────────────────────────────────────
+   Set via html[data-side]. The island is a narrow column: Mochi centred on top,
+   the card underneath, everything stacked instead of laid out beside the bot. */
+
+html[data-side] .view { top: 68px; height: calc(100% - 68px); }
+
+html[data-side] .stack {
+  padding: 12px 14px !important;
+  justify-content: flex-start;
+}
+html[data-side] .stack[style*="row"] {
+  flex-direction: column !important;
+  align-items: flex-start !important;
+}
+html[data-side] .stack .grow { display: none; }
+
+html[data-side] .who { padding: 0 28px 0 12px; }
+html[data-side] .ticker { margin: 6px 12px 0 12px; }
+html[data-side] .int-card { padding: 10px 12px 0 12px; }
+html[data-side] .chat-body { padding: 10px 12px 12px 12px; }
+html[data-side] .actions { flex-wrap: wrap; }
+
+html[data-side] .overview { flex-direction: column; }
+html[data-side] .overview > .left { flex: 1 1 auto; width: auto; min-height: 0; }
+html[data-side] .overview > .right { flex: 0 0 auto; }
+html[data-side] .pills { height: auto; padding: 8px; }
+
+html[data-side] .up-row,
+html[data-side] .up-track { left: 16px; width: calc(100% - 32px); }
+
+html[data-side] #greeting-canvas {
+  transform: scale(0.48);
+  transform-origin: top left;
+  left: 0 !important;
+}
+html[data-side] .overview > .right .card { height: auto; }
+html[data-side] .drop-body { padding: 0 14px; align-items: center; text-align: center; }
+html[data-side] .drop-tags { flex-wrap: wrap; justify-content: center; }

@@ -6,6 +6,9 @@
     <true/>
     <key>com.apple.security.network.client</key>
     <true/>
+    <!-- Google Calendar sign-in: one-shot OAuth redirect listener on 127.0.0.1 -->
+    <key>com.apple.security.network.server</key>
+    <true/>
     <key>com.apple.security.files.user-selected.read-write</key>
     <true/>
     <key>com.apple.security.files.bookmarks.app-scope</key>

@@ -18,6 +18,19 @@ export class IslandStateMachine {
   greetHoverCollapseDelay = 10;
   /** An alert waiting for an answer stays open, even when the mouse leaves. */
   pinned = false;
+  /** Hover mode: hovering the compact island opens it, clicking does not. */
+  hoverExpand = false;
+  /**
+   * Thin-bar look: hovering the bar peeks, a click opens, and the island folds back
+   * into the bar the moment the cursor leaves. Replaces hover-expand.
+   */
+  barMode = false;
+  /** Something (the chat field) needs the island to stay open while the cursor is away. */
+  holdOpen = false;
+  /** Bar mode, cursor left the compact island → bar, seconds. */
+  barLeaveDelay = 0.12;
+  /** Bar mode, peek with nobody hovering (a notification) → bar, seconds. */
+  barPeekDelay = 6;
 
   private petitHide: number | null = null;
   private homeCollapse: number | null = null;
@@ -38,6 +51,10 @@ export class IslandStateMachine {
         break;
       case "petit":
         this.clear("petitHide");
+        if (this.expandsOnHover) {
+          this.cancelTimers();
+          this.transition("home");
+        }
         break;
       case "home":
         this.clear("homeCollapse");
@@ -48,15 +65,24 @@ export class IslandStateMachine {
     }
   }
 
-  mouseLeft() {
+  /** `cursorLeft`: the cursor really left the island (not a timer-driven re-check). */
+  mouseLeft(cursorLeft = false) {
     switch (this.state) {
       case "hidden":
         break;
       case "petit":
-        this.schedulePetitHide();
+        this.schedulePetitHide(this.barMode && cursorLeft ? this.barLeaveDelay : undefined);
         break;
       case "home":
-        this.scheduleHomeCollapse();
+        if (cursorLeft && this.barMode && !this.pinned && !this.holdOpen) {
+          this.cancelTimers();
+          this.transition("hidden");
+        } else if (cursorLeft && this.expandsOnHover && !this.pinned) {
+          this.cancelTimers();
+          this.transition("petit");
+        } else {
+          this.scheduleHomeCollapse();
+        }
         break;
       case "coucou":
         this.clear("greetCollapse");
@@ -66,7 +92,7 @@ export class IslandStateMachine {
   }
 
   click() {
-    if (this.state !== "petit") return;
+    if (this.state !== "petit" || this.expandsOnHover) return;
     this.cancelTimers();
     this.transition("home");
   }
@@ -104,12 +130,18 @@ export class IslandStateMachine {
 
   // ── Timers ──────────────────────────────────────────────────────────────────
 
-  private schedulePetitHide() {
+  /** Hover mode opens straight from the compact island; the bar wants a click for that. */
+  private get expandsOnHover(): boolean {
+    return this.hoverExpand && !this.barMode;
+  }
+
+  private schedulePetitHide(delay?: number) {
     this.clear("petitHide");
+    const seconds = delay ?? (this.barMode ? this.barPeekDelay : this.petitToHiddenDelay);
     this.petitHide = window.setTimeout(() => {
       this.petitHide = null;
       if (this.state === "petit") this.transition("hidden");
-    }, this.petitToHiddenDelay * 1000);
+    }, seconds * 1000);
   }
 
   private scheduleHomeCollapse() {

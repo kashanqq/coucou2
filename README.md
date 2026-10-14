@@ -20,6 +20,9 @@ Approve permissions, watch your agents work, drop a file, chat with Claude — a
 
 </div>
 
+> [!NOTE]
+> **This is a modified version of [Louis-CFM/coucou](https://github.com/Louis-CFM/coucou).** All credit for the original app, the Mochi character, its artwork and sounds goes to Louis Raillé. What this fork changes is listed in [Changes in this fork](#changes-in-this-fork).
+
 ---
 
 ## Why
@@ -134,6 +137,36 @@ The macOS app is native Swift 6 / SwiftUI / AppKit with **zero third-party depen
 - A [Tauri 2](https://tauri.app) app (Rust + TypeScript): the island is a transparent, always-on-top window that never steals focus, Mochi is drawn in Canvas 2D with the same shapes, timings and sounds as on the Mac.
 - Claude Code hooks go through a tiny `coucou-hook.exe` and a named pipe; keys live in Windows Credential Manager.
 - Details and differences in [`windows/README.md`](windows/README.md).
+
+## Changes in this fork
+
+Compared with the [upstream repository](https://github.com/Louis-CFM/coucou):
+
+**Chat providers** *(macOS and Windows)*
+- The chat is no longer tied to the Anthropic API. Settings → **Chat provider** offers:
+  - **Anthropic API** — as before.
+  - **OpenAI-compatible API** — any base URL + model (DeepSeek by default, also OpenRouter, Groq, Ollama…). The key is stored as `openai-compat-key` in the Keychain / Credential Manager; it can be left empty for Ollama. No web search or PDF attachments with this provider; on Windows, images work if the model supports vision, and the model field accepts a fallback chain (`model-a, model-b`) — the next model answers when one hits a quota (429), overload (503) or credit (402) error.
+  - **Claude subscription (local `claude` CLI)** — uses the `claude` CLI already logged in on the machine (Pro/Max plan), keeping the conversation via its session id. The prompt goes through stdin/env, never the command line. Not available in the sandboxed App Store build.
+
+**Thin bar display style** *(macOS and Windows)*
+- A new look instead of the notch island / floating cloud: a 15 px black bar on the top edge. Hover → it peeks, click → it opens, cursor leaves → it folds straight back into the bar (no 15 s / 60 s timers).
+- Work events don't open it on their own. Alerts and anything opened without the cursor (menu, shortcut, dropping Mochi on a window) stay open until closed, so a pending permission is never lost.
+- On Windows, while folded, Claude Code, integrations and calendar reminders just write one status line on the bar ("Needs permission · …", "Vercel · my-app", "In 5 min · Standup"); the bar widens to fit it. Opening the island while a permission waits goes straight to Allow / Deny.
+- macOS: Settings → **Display** (`Notch island` / `Thin strip`). Windows: Settings → **Look**. Described in [`docs/SPEC.md`](docs/SPEC.md).
+
+**Google Calendar** *(Windows)*
+- A **Calendar** tab next to the chat shows the week, with **Join** buttons for Meet links; the island opens 5 minutes before a meeting.
+- Read-only OAuth with your own Google Cloud client (Desktop app), PKCE and a one-shot `127.0.0.1` redirect — no server in between. Client ID, secret and refresh token live in the Credential Manager (the refresh token is written by Rust only and never exposed to the front end); disconnecting revokes access at Google.
+
+**Island placement and behaviour** *(Windows)*
+- Dock to the top, left or right edge (vertical column on the sides, with a distance from the top).
+- Alignment (center / left / right) plus a horizontal offset, gap from the top edge, compact width (150–288 px).
+- Configurable wake delay before the hidden island peeks, and an optional **Expand on hover** mode (open on hover, close as soon as the cursor leaves).
+- Fixed a race where a late poll tick could make the collapsed wake strip click-through, leaving a bar that ignored hovers and clicks.
+- The upload progress bar now scales with the island width instead of a fixed 526 px.
+
+**Build** *(Windows)*
+- `npm run pack` also produces a portable folder `windows/release/Coucou-portable/` (`coucou.exe` + `coucou-hook.exe`, no installer).
 
 ## Contributing
 

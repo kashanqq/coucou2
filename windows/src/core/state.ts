@@ -2,6 +2,7 @@
 
 import type { BotEmoteName, BotStateName, IslandMode, IslandViewName } from "./layout";
 import type { EyeShape } from "../mochi/engine";
+import type { CalendarEvent } from "./bridge";
 
 export type AgentSource = "claudeCode" | "n8n";
 export type PillBadge = "approval" | "finished" | "error";
@@ -92,6 +93,28 @@ export interface Settings {
   hooksInstalled: boolean;
   /** Claude model used by the chat. */
   model: string;
+  /** Chat backend: Anthropic API, any OpenAI-compatible API, or the local claude CLI (subscription). */
+  provider: "anthropic" | "openai" | "claudeCli";
+  openaiBaseUrl: string;
+  openaiModel: string;
+  /** Island position along the top edge. */
+  islandAlign: "center" | "left" | "right";
+  /** Extra horizontal shift in px (positive = right). */
+  islandOffsetX: number;
+  /** Hover time over the wake strip before the hidden island peeks, in ms. */
+  wakeDelay: number;
+  /** Open the island on hover (and close it as soon as the cursor leaves) instead of on click. */
+  hoverExpand: boolean;
+  /** Gap between the screen's top edge and the island, px (0 = glued). */
+  islandGap: number;
+  /** Width of the compact island, px. */
+  compactWidth: number;
+  /** Screen edge the island lives on. */
+  islandDock: "top" | "left" | "right";
+  /** Distance from the top of the screen when docked to a side, px. */
+  islandOffsetY: number;
+  /** "island" = the floating cloud that appears on demand; "bar" = a thin black bar that is always there. */
+  islandStyle: "island" | "bar";
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -106,6 +129,18 @@ export const DEFAULT_SETTINGS: Settings = {
   autostart: false,
   hooksInstalled: false,
   model: "claude-opus-5",
+  provider: "anthropic",
+  openaiBaseUrl: "https://api.deepseek.com",
+  openaiModel: "deepseek-chat",
+  islandAlign: "center",
+  islandOffsetX: 0,
+  wakeDelay: 350,
+  hoverExpand: false,
+  islandGap: 8,
+  compactWidth: 200,
+  islandDock: "top",
+  islandOffsetY: 160,
+  islandStyle: "island",
 };
 
 type Listener = () => void;
@@ -139,6 +174,14 @@ class AppState {
   pendingApproval: ApprovalInfo | null = null;
 
   integrations: Record<string, IntegrationInfo> = {};
+
+  /** Google Calendar, as last synced by Rust. */
+  calendar: {
+    connected: boolean;
+    events: CalendarEvent[];
+    error: string | null;
+    syncedAt: number | null;
+  } = { connected: false, events: [], error: null, syncedAt: null };
 
   lastActivity = performance.now();
 
@@ -229,6 +272,8 @@ class AppState {
   }
 
   defaultView(): IslandViewName {
+    // A permission waiting for an answer is what opening the island is for.
+    if (this.pendingApproval) return "approval";
     return this.tasks.length === 0 ? "empty" : "overview";
   }
 }

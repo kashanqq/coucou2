@@ -138,6 +138,8 @@ function handleHook(island: Island, payload: HookPayload) {
 
   /** Alerts force the island open; work events only reveal the compact island. */
   const surface = (view: Parameters<Island["alert"]>[0], isAlert: boolean) => {
+    // Folded into the thin bar: the bar's own status line says it all.
+    if (island.quietBar) return;
     if (State.mode === "expanded") {
       if (isAlert) island.setView(view);
     } else if (isAlert) {
@@ -250,14 +252,20 @@ function handleHook(island: Island, payload: HookPayload) {
       // line is synchronous, so the card really is up by the time it lands.
       if (requestId) void Bridge.approvalAck(requestId);
       State.updateTask(CLAUDE_ID, "approval");
-      State.isPinned = true;
       Sound.play("approval");
-      if (focused) {
+      if (island.quietBar) {
+        // The request sits on the bar ("Needs permission · …"); hovering and
+        // clicking it opens straight on Allow / Deny (see State.defaultView).
+        // The relay still waits: the person can act on it from here.
+        State.setPillBadge(CLAUDE_ID, "approval");
+      } else if (focused) {
+        State.isPinned = true;
         island.alert("approval");
       } else {
         // Another agent holds the view, so the card would yank it away. The badge
         // is the signal instead — but it has to be on screen for that to mean
         // anything, hence the reveal. We just told the relay a human can act.
+        State.isPinned = true;
         State.setPillBadge(CLAUDE_ID, "approval");
         island.reveal();
       }

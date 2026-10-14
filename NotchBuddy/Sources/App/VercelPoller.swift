@@ -93,8 +93,14 @@ final class VercelPoller: @unchecked Sendable {
         }
         SoundEngine.shared.play(latest.isSuccess ? "finish" : "error")
 
-        // Reveal compact island so user sees the badge
-        NotificationCenter.default.post(name: .hookReveal, object: nil)
+        // Reveal compact island so user sees the badge — or, folded into the
+        // thin strip, just say it on the bar.
+        if appState.quietStrip {
+            appState.notifyStrip("Vercel · \(latest.projectName) · \(latest.statusLabel)",
+                                 color: latest.isSuccess ? "#34D399" : "#F4505E", for: 8)
+        } else {
+            NotificationCenter.default.post(name: .hookReveal, object: nil)
+        }
 
         // Auto-clear task state after 60s (deployments list stays)
         DispatchQueue.main.asyncAfter(deadline: .now() + 60) {

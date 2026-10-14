@@ -43,6 +43,9 @@ export const Bridge = {
   setIslandRect: (x: number, y: number, width: number, height: number) =>
     call<void>("set_island_rect", { x, y, width, height }),
 
+  /** Thin-bar look: width of the collapsed bar window, logical px. */
+  setBarWidth: (width: number) => call<void>("set_bar_width", { width }),
+
   /** Give the window keyboard focus (chat field) and take it away again. */
   focusWindow: (focused: boolean) => call<void>("focus_window", { focused }),
 
@@ -97,7 +100,44 @@ export const Bridge = {
 
   /** Tray → Pause. Stops the integration pollers, not just the island. */
   setPaused: (paused: boolean) => call<void>("set_paused", { paused }),
+
+  // ── Google Calendar ───────────────────────────────────────────────────────
+  /** Opens Google's consent page; resolves once the browser has come back. */
+  calendarConnect: () => callOrThrow<void>("calendar_connect"),
+  calendarDisconnect: () => call<void>("calendar_disconnect"),
+  /** Syncs now; the result arrives as a `calendar` event. */
+  calendarRefresh: () => call<void>("calendar_refresh"),
+  calendarStatus: () => call<CalendarStatus>("calendar_status"),
 };
+
+export interface CalendarStatus {
+  connected: boolean;
+  clientReady: boolean;
+  signingIn: boolean;
+}
+
+export interface CalendarUpdate {
+  connected: boolean;
+  /** null when the sync failed — keep what is already shown. */
+  events: CalendarEvent[] | null;
+  error: string | null;
+  syncedAt: number | null;
+}
+
+export interface CalendarEvent {
+  id: string;
+  calendarId: string;
+  calendar: string;
+  color: string;
+  title: string;
+  /** RFC 3339 date-time, or YYYY-MM-DD for all-day events. */
+  start: string;
+  end: string;
+  allDay: boolean;
+  location: string | null;
+  meetUrl: string | null;
+  htmlLink: string | null;
+}
 
 export interface IntegrationUpdate {
   id: string;

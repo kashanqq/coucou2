@@ -26,6 +26,9 @@ final class IslandStateMachine {
     /// coucou → petit delay when mouse is hovering over the greeting.
     var greetHoverCollapseDelay: TimeInterval = 10
 
+    /// Strip display style: leaving the island collapses it to `.hidden` immediately (no timers).
+    var collapseOnLeave = false
+
     private var petitHideWork: DispatchWorkItem?
     private var homeCollapseWork: DispatchWorkItem?
     private var greetCollapseWork: DispatchWorkItem?
@@ -62,9 +65,9 @@ final class IslandStateMachine {
         case .hidden:
             break
         case .petit:
-            schedulePetitHide()
+            if collapseOnLeave { forceHidden() } else { schedulePetitHide() }
         case .home:
-            scheduleHomeCollapse()
+            if collapseOnLeave { forceHidden() } else { scheduleHomeCollapse() }
         case .coucou:
             // Interrupt greeting immediately → compact (overrides 10s auto-collapse)
             greetCollapseWork?.cancel(); greetCollapseWork = nil
@@ -97,6 +100,19 @@ final class IslandStateMachine {
         }
         greetCollapseWork = item
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+
+    /// Forget the current state without firing `onTransition`: the island stays open but no longer
+    /// follows the cursor (strip style: alerts and other externally opened views stay until closed).
+    func detach() {
+        cancelTimers()
+        state = .hidden
+    }
+
+    /// Drop straight to `.hidden`, cancelling every pending timer.
+    func forceHidden() {
+        cancelTimers()
+        transition(to: .hidden)
     }
 
     /// Non-alert work event: show compact from hidden (HookServer reveal)

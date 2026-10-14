@@ -146,6 +146,18 @@ Permissions : Enregistrement de l'écran (capture) et Automatisation (navigateur
 
 ---
 
+## 6 bis. Google Calendar (lecture seule)
+
+- Onglet `calendar` dans l'en-tête (entre le chat et le dépôt) : la semaine à venir groupée par jour (« Today », « Tomorrow », puis le jour), événement en cours marqué « now », prochain marqué « in 12 min », bouton « Join » pour les liens Meet, clic sur un événement → ouvre Google Calendar. La liste s'ouvre sur l'événement en cours.
+- Connexion : Réglages → Google Calendar. L'utilisateur fournit **son propre** client OAuth (Google Cloud → API Google Calendar activée → écran de consentement → Identifiants → ID client OAuth « Application de bureau »). Flux « installed app » : le navigateur ouvre la page de consentement, Google redirige vers un écouteur ponctuel sur `127.0.0.1` (port libre), échange du code avec PKCE (S256). Portée `calendar.readonly`. Aucun serveur intermédiaire.
+- Secrets : client ID, client secret et refresh token dans le Trousseau (clés `gcal-client-id`, `gcal-client-secret`, `gcal-refresh-token`) ; le jeton d'accès reste en mémoire. « Disconnect » révoque l'accès chez Google.
+- Synchro toutes les 2 min (et bouton ↻) : tous les agendas cochés dans Google Calendar, de −36 h à +8 jours. Événements annulés et invitations refusées ignorés.
+- Rappel : 5 min avant un événement, l'island s'ouvre sur `calendar` (son `pop`), sauf si elle est déjà ouverte. En style Strip replié : ligne « In 5 min · … » sur la barre à la place.
+- Une app restée en statut « Testing » dans Google Cloud perd son accès au bout de 7 jours (`invalid_grant`) : l'onglet le dit et il faut se reconnecter. Passer l'app « In production » évite ça.
+- Build App Store : nécessite `com.apple.security.network.server` pour l'écouteur `127.0.0.1`.
+
+---
+
 ## 7. Permissions macOS demandées (récapitulatif pour Louis)
 
 | Permission | Pourquoi | Quand |

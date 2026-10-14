@@ -100,6 +100,13 @@ struct IslandContainer: View {
 
             CountdownBar(state: state, islandW: islandWidth)
 
+            // Strip style, folded: one line of what is going on, written on the bar.
+            if state.displayStyle == .strip && state.mode == .hidden, let status = state.stripStatus {
+                StripStatusLine(status: status)
+                    .frame(width: islandWidth, height: islandHeight)
+                    .transition(.opacity.animation(.easeOut(duration: 0.18).delay(0.12)))
+            }
+
             Group {
                 if state.mode == .compact {
                     CompactMiniGrid(state: state)
@@ -112,18 +119,14 @@ struct IslandContainer: View {
         .frame(width: islandWidth, height: islandHeight, alignment: .topLeading)
         .onChange(of: state.mode) { oldMode, newMode in
             let shrinking = modeOrder(newMode) < modeOrder(oldMode)
-            let anim = shrinking ? closeEase : openSpring
-            let (w, h) = islandSize(mode: newMode, view: state.view,
-                                    progress: state.uploadProgress,
-                                    nw: state.notchWidth, nh: state.notchHeight)
-            let cr  = newMode == .expanded ? IslandConst.expandedCorner : IslandConst.roundedCorner
-            let tr: CGFloat = 0
-            withAnimation(anim) {
-                islandWidth      = w
-                islandHeight     = (newMode == .expanded && state.view == .prompt) ? chatPromptHeight : h
-                cornerRadius     = cr
-                islandTopRadius  = tr
-            }
+            resize(for: newMode, animation: shrinking ? closeEase : openSpring)
+        }
+        .onChange(of: state.displayStyle) { _, _ in
+            resize(for: state.mode, animation: openSpring)
+        }
+        .onChange(of: state.stripStatusWidth) { old, new in
+            guard state.mode == .hidden else { return }
+            resize(for: .hidden, animation: new > old ? openSpring : closeEase)
         }
         .onChange(of: state.view) { _, newView in
             guard state.mode == .expanded else { return }
@@ -134,7 +137,8 @@ struct IslandContainer: View {
             }
             let (w, h) = islandSize(mode: .expanded, view: newView,
                                     progress: state.uploadProgress,
-                                    nw: state.notchWidth, nh: state.notchHeight)
+                                    nw: state.notchWidth, nh: state.notchHeight,
+                                    style: state.displayStyle, stripW: state.stripStatusWidth)
             withAnimation(openSpring) {
                 islandWidth  = w
                 islandHeight = newView == .prompt ? chatPromptHeight : h
@@ -147,10 +151,11 @@ struct IslandContainer: View {
         .onAppear {
             let (w, h) = islandSize(mode: state.mode, view: state.view,
                                     progress: state.uploadProgress,
-                                    nw: state.notchWidth, nh: state.notchHeight)
+                                    nw: state.notchWidth, nh: state.notchHeight,
+                                    style: state.displayStyle, stripW: state.stripStatusWidth)
             islandWidth      = w
             islandHeight     = state.view == .prompt ? chatPromptHeight : h
-            cornerRadius     = state.mode == .expanded ? IslandConst.expandedCorner : IslandConst.roundedCorner
+            cornerRadius     = IslandConst.corner(mode: state.mode, style: state.displayStyle)
             islandTopRadius  = 0
         }
         .onReceive(NotificationCenter.default.publisher(for: .botGreet)) { _ in
@@ -158,8 +163,43 @@ struct IslandContainer: View {
         }
     }
 
+    private func resize(for mode: IslandMode, animation: Animation) {
+        let (w, h) = islandSize(mode: mode, view: state.view,
+                                progress: state.uploadProgress,
+                                nw: state.notchWidth, nh: state.notchHeight,
+                                style: state.displayStyle, stripW: state.stripStatusWidth)
+        withAnimation(animation) {
+            islandWidth      = w
+            islandHeight     = (mode == .expanded && state.view == .prompt) ? chatPromptHeight : h
+            cornerRadius     = IslandConst.corner(mode: mode, style: state.displayStyle)
+            islandTopRadius  = 0
+        }
+    }
+
     private func modeOrder(_ m: IslandMode) -> Int {
         switch m { case .hidden: return 0; case .compact: return 1; case .expanded: return 2 }
+    }
+}
+
+// MARK: - Strip status line
+
+struct StripStatusLine: View {
+    let status: StripStatus
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(Color(hex: status.color))
+                .frame(width: 5, height: 5)
+                .shadow(color: Color(hex: status.color), radius: 2.5)
+            Text(status.text)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(Color(hex: "#9398A1"))
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .padding(.horizontal, 12)
+        .allowsHitTesting(false)
     }
 }
 
@@ -251,7 +291,7 @@ struct BotPlacement: View {
     let islandH: CGFloat
 
     var body: some View {
-        let (cx, cy, diameter, opacity) = botPosition(mode: state.mode, view: state.view, islandW: islandW, islandH: islandH, uploadProgress: state.uploadProgress)
+        let (cx, cy, diameter, opacity) = botPosition(mode: state.mode, view: state.view, islandW: islandW, islandH: islandH, uploadProgress: state.uploadProgress, style: state.displayStyle)
         let canvasSize = diameter / 0.6
         let overhang: CGFloat = 40
         let isUploading = state.view == .uploading
@@ -338,10 +378,11 @@ struct BotPlacement: View {
     }
 }
 
-func botPosition(mode: IslandMode, view: IslandView, islandW: CGFloat, islandH: CGFloat, uploadProgress: Double) -> (CGFloat, CGFloat, CGFloat, Double) {
+func botPosition(mode: IslandMode, view: IslandView, islandW: CGFloat, islandH: CGFloat, uploadProgress: Double,
+                 style: DisplayStyle = .notch) -> (CGFloat, CGFloat, CGFloat, Double) {
     switch mode {
     case .hidden:   return (46, 16, 6, 0)
-    case .compact:  return (40, 16, 20, 1)
+    case .compact:  return (40, style == .strip ? islandH / 2 : 16, 20, 1)
     case .expanded:
         let layout = IslandConst.viewLayouts[view]!
         let diameter = layout.botDiameter
@@ -427,7 +468,7 @@ struct IslandContentView: View {
                     // Views that fill available height instead of the fixed 98pt content frame:
                     // chat (prompt) is always flexible; mail is flexible only when active so
                     // it doesn't push the ZStack taller when inactive.
-                    let isTall = v == .prompt || (v == .mail && active)
+                    let isTall = v == .prompt || ((v == .mail || v == .calendar) && active)
                     let anim: Animation = active
                         ? .spring(response: 0.4, dampingFraction: 0.8).delay(0.16)
                         : .easeIn(duration: 0.16)
@@ -467,6 +508,7 @@ struct IslandHeader: View {
                     }
                     #endif
                 })
+                TabButton(icon: "calendar", view: .calendar, state: state)
                 TabButton(icon: "plus", view: .upload, state: state)
             }
             .padding(.leading, 14)

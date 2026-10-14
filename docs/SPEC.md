@@ -44,6 +44,16 @@ Grille compact : pastilles Ø 9,5 autour du point (largeur − 27, hN/2), écart
 9. Plusieurs alertes en même temps : file d'attente, une à la fois, l'ordre d'arrivée.
 10. **Focus** : le gros bonhomme représente la tâche en focus (la dernière alerte, sinon la première qui travaille). Les autres tâches sont les mini-bonhommes. Cliquer un mini-bonhomme le met en focus.
 
+### Style d'affichage « Strip » (réglage `displayStyle`, Réglages → Display)
+
+Alternative au notch : une fine barre noire de 15 pt en haut de l'écran (largeur du notch, coins bas arrondis 7 pt, haut plat).
+
+- Au repos (`hidden`) : la barre seule. **Rien ne l'ouvre tout seul** : ni Claude Code (travail, alertes, demandes de permission), ni les intégrations, ni le calendrier. À la place, la barre écrit une ligne de statut (texte 10 pt, point coloré) et s'élargit pour la contenir (max 420 pt) : « Needs permission · Bash · … » (ambre), « projet · Exécute · … » (bleu), « … finished » (vert), « … stopped on an error » (rouge), « Vercel · my-app · Ready », « In 5 min · Standup »… Une permission en attente reste annoncée sur la barre ; survol + clic ouvrent directement la vue `approval`, qui reste ouverte jusqu'à la réponse.
+- **Souris sur la barre** → léger entrebâillement (`compact` : 34 pt de haut, bonhomme à gauche, grille 2×2 à droite). Pas de marge sous la barre : le curseur doit vraiment être dessus.
+- **Clic** → `expanded` (vue `overview`/`empty`).
+- **Le curseur part** → retour immédiat à la barre (aucun timer 15 s / 60 s).
+- Exception : tout ce qui ouvre l'island sans le curseur (alertes, « Open Coucou » du menu, raccourci clavier, dépôt d'un bonhomme sur une fenêtre) reste ouvert jusqu'à fermeture explicite (bouton, `Échap`), pour ne jamais perdre une permission en attente.
+
 ## 4. Animations de l'island
 
 - Ouverture / agrandissement : 520 ms, ressort avec léger dépassement, équivalent `cubic-bezier(.32,1.22,.42,1)`. En SwiftUI, partir de `.spring(response: 0.5, dampingFraction: 0.72)` et ajuster à l'œil contre le prototype.

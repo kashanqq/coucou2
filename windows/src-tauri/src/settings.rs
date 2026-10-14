@@ -20,10 +20,84 @@ pub struct Settings {
     /// Defaulted explicitly so a settings.json written by an older build still loads.
     #[serde(default = "default_model")]
     pub model: String,
+    /// "anthropic" | "openai" (any OpenAI-compatible API) | "claudeCli" (local claude CLI, i.e. the subscription).
+    #[serde(default = "default_provider")]
+    pub provider: String,
+    #[serde(default = "default_openai_base_url")]
+    pub openai_base_url: String,
+    #[serde(default = "default_openai_model")]
+    pub openai_model: String,
+    /// Where the island sits along the top edge: "center" | "left" | "right".
+    #[serde(default = "default_align")]
+    pub island_align: String,
+    /// Extra horizontal shift in logical px (positive = right), on top of the alignment.
+    #[serde(default)]
+    pub island_offset_x: f64,
+    /// Hover time over the wake strip before a hidden island peeks out, in ms.
+    #[serde(default = "default_wake_delay")]
+    pub wake_delay: f64,
+    /// Open the island on hover (closing as soon as the cursor leaves) instead of on click.
+    #[serde(default)]
+    pub hover_expand: bool,
+    /// Gap between the screen's top edge and the island, in logical px (0 = glued to the edge).
+    #[serde(default = "default_gap")]
+    pub island_gap: f64,
+    /// Width of the compact island, in logical px.
+    #[serde(default = "default_compact_width")]
+    pub compact_width: f64,
+    /// Which screen edge the island lives on: "top" | "left" | "right".
+    #[serde(default = "default_dock")]
+    pub island_dock: String,
+    /// Distance from the top of the screen when docked to a side edge, in logical px.
+    #[serde(default = "default_offset_y")]
+    pub island_offset_y: f64,
+    /// "island" (floating cloud, shown on demand) | "bar" (thin black bar always on the top edge).
+    #[serde(default = "default_style")]
+    pub island_style: String,
+}
+
+fn default_style() -> String {
+    "island".into()
+}
+
+fn default_dock() -> String {
+    "top".into()
+}
+
+fn default_offset_y() -> f64 {
+    160.0
+}
+
+fn default_gap() -> f64 {
+    8.0
+}
+
+fn default_compact_width() -> f64 {
+    200.0
+}
+
+fn default_align() -> String {
+    "center".into()
+}
+
+fn default_wake_delay() -> f64 {
+    350.0
 }
 
 fn default_model() -> String {
     crate::claude::DEFAULT_MODEL.to_string()
+}
+
+fn default_provider() -> String {
+    "anthropic".into()
+}
+
+fn default_openai_base_url() -> String {
+    "https://api.deepseek.com".into()
+}
+
+fn default_openai_model() -> String {
+    "deepseek-chat".into()
 }
 
 impl Default for Settings {
@@ -43,6 +117,18 @@ impl Default for Settings {
             autostart: false,
             hooks_installed: false,
             model: default_model(),
+            provider: default_provider(),
+            openai_base_url: default_openai_base_url(),
+            openai_model: default_openai_model(),
+            island_align: default_align(),
+            island_offset_x: 0.0,
+            wake_delay: default_wake_delay(),
+            hover_expand: false,
+            island_gap: default_gap(),
+            compact_width: default_compact_width(),
+            island_dock: default_dock(),
+            island_offset_y: default_offset_y(),
+            island_style: default_style(),
         }
     }
 }

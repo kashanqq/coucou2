@@ -90,6 +90,11 @@ final class AppState: ObservableObject {
     // Short note message (shown in NoteView)
     @Published var noteMessage: String? = nil
 
+    // Display style (notch island / thin top strip) — persisted
+    @Published var displayStyle: DisplayStyle = .notch {
+        didSet { UserDefaults.standard.set(displayStyle.rawValue, forKey: "displayStyle") }
+    }
+
     // Auto-close delay — persisted
     @Published var autoCloseInterval: TimeInterval = 15 {
         didSet { UserDefaults.standard.set(autoCloseInterval, forKey: "autoCloseInterval") }
@@ -180,11 +185,22 @@ final class AppState: ObservableObject {
     // Pending approval request from Claude Code hook
     @Published var pendingApproval: ApprovalInfo? = nil
 
+    // Google Calendar (populated by GoogleCalendarService)
+    @Published var calendarEvents: [CalendarEvent] = []
+    @Published var calendarConnected: Bool = false
+    @Published var calendarError: String? = nil
+    @Published var calendarSyncedAt: Date? = nil
+
+    // Strip style: a passing note written on the folded bar (integrations, calendar)
+    @Published var stripNotice: StripStatus? = nil
+    private var stripNoticeWork: DispatchWorkItem?
+
     // MARK: - Init (loads persisted settings)
 
     private init() {
         let ud = UserDefaults.standard
 
+        if let s = ud.string(forKey: "displayStyle"), let v = DisplayStyle(rawValue: s) { displayStyle = v }
         if let v = ud.object(forKey: "soundEnabled") as? Bool   { soundEnabled = v }
         if let v = ud.object(forKey: "soundVolume")  as? Double { soundVolume  = v }
         // Migrate old 60s default → 15s
@@ -220,6 +236,56 @@ final class AppState: ObservableObject {
         stateOverride ?? focusTask?.state ?? .idle
     }
 
+    // MARK: - Quiet strip
+    //
+    // Strip style, folded into the bar: nothing opens the island on its own.
+    // Claude Code, integrations and the calendar write one line on the bar
+    // instead, and the user opens it when they choose to.
+
+    var quietStrip: Bool { displayStyle == .strip && mode == .hidden }
+
+    /// What the bar says, or nil when there is nothing to say.
+    var stripStatus: StripStatus? {
+        guard displayStyle == .strip else { return nil }
+        if let approval = pendingApproval {
+            let target = approval.command == approval.tool ? approval.tool : "\(approval.tool) · \(approval.command)"
+            return StripStatus(text: "Needs permission · \(target)", color: "#F5A524")
+        }
+        // Short-lived, so it may talk over Claude Code's running status for a moment.
+        if let notice = stripNotice { return notice }
+        guard let claude = tasks.first(where: { $0.id == "integration_claude" }) else { return nil }
+        let step = claude.steps.last
+        let project = claude.name == "VS Code" || claude.name.isEmpty ? "Claude Code" : claude.name
+        func withStep(_ label: String) -> String { step.map { "\(label) · \($0)" } ?? label }
+        switch claude.state {
+        case .thinking:  return StripStatus(text: withStep("\(project) is thinking"), color: "#A78BFA")
+        case .working:   return StripStatus(text: step.map { "\(project) · \($0)" } ?? "\(project) is working", color: "#3B9EFF")
+        case .question:  return StripStatus(text: withStep("Question"), color: "#22D3EE")
+        case .finished:  return StripStatus(text: withStep("\(project) finished"), color: "#34D399")
+        case .error:     return StripStatus(text: withStep("\(project) stopped on an error"), color: "#F4505E")
+        case .ratelimit: return StripStatus(text: "Claude Code hit a rate limit", color: "#F59E0B")
+        default:         return nil
+        }
+    }
+
+    /// Width the bar needs for its status line (0 = no line). The strip grows to it.
+    var stripStatusWidth: CGFloat {
+        guard let status = stripStatus else { return 0 }
+        let font = NSFont.systemFont(ofSize: 10, weight: .medium)
+        let text = (status.text as NSString).size(withAttributes: [.font: font]).width
+        // dot 5 + gap 6 + side padding 2×12
+        return min(IslandConst.stripStatusMaxWidth, ceil(text) + 35)
+    }
+
+    /// A passing note on the folded strip, gone after `seconds`.
+    func notifyStrip(_ text: String, color: String, for seconds: TimeInterval) {
+        stripNoticeWork?.cancel()
+        stripNotice = StripStatus(text: text, color: color)
+        let item = DispatchWorkItem { [weak self] in self?.stripNotice = nil }
+        stripNoticeWork = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: item)
+    }
+
     // MARK: - Task management
 
     func addTask(_ task: AgentTask) {
@@ -252,7 +318,8 @@ final class AppState: ObservableObject {
         // If no tasks and not expanded/peek, go hidden
         if tasks.isEmpty && mode == .compact {
             mode = .hidden
-        } else if !tasks.isEmpty && mode == .hidden && isPresent {
+        } else if !tasks.isEmpty && mode == .hidden && isPresent && displayStyle == .notch {
+            // Strip style: the peek only ever opens on hover (driven by the FSM)
             mode = .compact
         }
     }
@@ -296,6 +363,12 @@ final class AppState: ObservableObject {
 }
 
 // MARK: - Supporting types
+
+/// One line on the folded strip: what it says and the colour of its dot.
+struct StripStatus: Equatable {
+    let text: String
+    let color: String
+}
 
 enum PromptContext {
     case window(appName: String, title: String, url: String?)

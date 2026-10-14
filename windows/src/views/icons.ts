@@ -36,6 +36,10 @@ export const ICONS = {
   star: "M12 3.2l2.6 5.55 5.9.82-4.3 4.3 1.05 6.13L12 17.1l-5.25 2.9L7.8 13.87 3.5 9.57l5.9-.82L12 3.2z",
   // square.stack.fill
   stack: "M5 8h14v11.5H5V8zm1.8-3h10.4v1.6H6.8V5zm1.6-2.6h7.2V4H8.4V2.4z",
+  // calendar
+  calendar: "M7 2h2v2h6V2h2v2h2.2A1.8 1.8 0 0 1 21 5.8v13.4a1.8 1.8 0 0 1-1.8 1.8H4.8A1.8 1.8 0 0 1 3 19.2V5.8A1.8 1.8 0 0 1 4.8 4H7V2zM5 9.5V19h14V9.5H5zm2 2h3.2v3.2H7v-3.2z",
+  // arrow.clockwise (stroked)
+  refresh: "M19 12a7 7 0 1 1-2.05-4.95M19 4.5V8h-3.5",
   // doc.text
   doc: "M6.5 2.6h7l4 4v14.8h-11V2.6zm6.6 1.6v3.3h3.3l-3.3-3.3zM8.6 11h6.8v1.5H8.6V11zm0 3.4h6.8v1.5H8.6v-1.5z",
 } as const;

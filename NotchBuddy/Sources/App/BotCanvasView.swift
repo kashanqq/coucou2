@@ -94,10 +94,12 @@ struct BotCanvasView: View {
         let screen = NSScreen.main ?? NSScreen.screens[0]
         let (islandW, islandH) = islandSize(mode: state.mode, view: state.view,
                                              progress: state.uploadProgress,
-                                             nw: state.notchWidth, nh: state.notchHeight)
+                                             nw: state.notchWidth, nh: state.notchHeight,
+                                             style: state.displayStyle)
         let (botCx, _, _, _) = botPosition(mode: state.mode, view: state.view,
                                             islandW: islandW, islandH: islandH,
-                                            uploadProgress: state.uploadProgress)
+                                            uploadProgress: state.uploadProgress,
+                                            style: state.displayStyle)
         // Island is centered on screen; bot is at botCx within island coords
         let botScreenX = screen.frame.midX - islandW / 2 + botCx
         return tanh((state.mousePosition.x - botScreenX) / 260)
@@ -106,13 +108,15 @@ struct BotCanvasView: View {
     private func lookY(state: AppState, size: CGSize) -> CGFloat {
         let (islandW, islandH) = islandSize(mode: state.mode, view: state.view,
                                              progress: state.uploadProgress,
-                                             nw: state.notchWidth, nh: state.notchHeight)
+                                             nw: state.notchWidth, nh: state.notchHeight,
+                                             style: state.displayStyle)
         let actualH: CGFloat = (state.mode == .expanded && state.view == .prompt)
             ? min(300, 240 + CGFloat(state.chatHistory.count) * 40)
             : islandH
         let (_, botCy, _, _) = botPosition(mode: state.mode, view: state.view,
                                              islandW: islandW, islandH: actualH,
-                                             uploadProgress: state.uploadProgress)
+                                             uploadProgress: state.uploadProgress,
+                                             style: state.displayStyle)
         // Island top = screen top → bot screen Y = botCy from island top
         return -tanh((state.mousePosition.y - botCy) / 200)
     }

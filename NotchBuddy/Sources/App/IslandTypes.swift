@@ -6,12 +6,22 @@ enum IslandMode: String, CaseIterable {
     case hidden, compact, expanded
 }
 
+// MARK: - Display style
+//
+// notch: island glued to the notch (hidden = notch-sized, compact = notch + ears).
+// strip: thin black bar at the top of the screen. Hover → small peek, click → fully open,
+//        cursor leaves → back to the bar immediately (no timers).
+
+enum DisplayStyle: String, CaseIterable {
+    case notch, strip
+}
+
 // MARK: - Island View
 
 enum IslandView: String, CaseIterable {
     case overview, empty, approval, question, error, finished
     case confused, upload, uploading, choose, mail, prompt
-    case searching, result, note, settings, greeting
+    case searching, result, note, settings, calendar, greeting
 }
 
 // MARK: - Bot State
@@ -86,6 +96,23 @@ enum IslandConst {
     static let roundedCorner: CGFloat = 14    // hidden/peek/compact
     static let expandedCorner: CGFloat = 22
 
+    // Strip style
+    static let stripHeight: CGFloat     = 15   // idle bar
+    static let stripPeekHeight: CGFloat = 34   // hover peek
+    static let stripCorner: CGFloat     = 7
+    static let stripPeekCorner: CGFloat = 14
+    /// The folded strip widens to fit its status line, up to this.
+    static let stripStatusMaxWidth: CGFloat = 420
+
+    static func corner(mode: IslandMode, style: DisplayStyle) -> CGFloat {
+        switch (mode, style) {
+        case (.expanded, _):      return expandedCorner
+        case (.hidden, .strip):   return stripCorner
+        case (.compact, .strip):  return stripPeekCorner
+        default:                  return roundedCorner
+        }
+    }
+
     static let viewLayouts: [IslandView: ViewLayout] = [
         // Home is the reference: height 150
         .overview:  ViewLayout(height: 160, botX: 68,  botY: nil, botDiameter: 58, agentMode: .pills),
@@ -105,6 +132,7 @@ enum IslandConst {
         .result:    ViewLayout(height: 160, botX: 52,  botY: nil, botDiameter: 44, agentMode: .column),
         .note:      ViewLayout(height: 160, botX: 60,  botY: nil, botDiameter: 50, agentMode: .column),
         .settings:  ViewLayout(height: 160, botX: 54,  botY: nil, botDiameter: 46, agentMode: .none),
+        .calendar:  ViewLayout(height: 260, botX: 52,  botY: nil, botDiameter: 44, agentMode: .none),
         // Greeting: bot drawn by GreetingCanvasView; no BotPlacement needed
         .greeting:  ViewLayout(height: 150, botX: 320, botY: 90,  botDiameter: 0,  agentMode: .none),
     ]

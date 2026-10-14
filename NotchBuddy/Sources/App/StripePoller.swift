@@ -140,6 +140,9 @@ final class StripePoller: @unchecked Sendable {
         state.tasks[idx].steps = [newest.description ?? newest.amountFormatted]
         if !focused { state.tasks[idx].pillBadge = .finished }
         SoundEngine.shared.play("finish")
+        if state.quietStrip {
+            state.notifyStrip("Stripe · \(newest.description ?? newest.amountFormatted)", color: "#34D399", for: 8)
+        }
 
         // 2. After slide settles, count up balance
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {

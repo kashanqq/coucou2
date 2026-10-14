@@ -6,7 +6,7 @@ import { Bridge, IS_TAURI, onDragDrop } from "../core/bridge";
 import {
   EXPANDED_CORNER, EXPANDED_W, NOTCH_W, PANEL_H, PANEL_W,
   ROUNDED_CORNER, VIEW_LAYOUTS, botGlowColor, botGlowOpacity, botPosition, chatPromptHeight,
-  islandSize,
+  BAR_H, BAR_STATUS_MAX_W, SIDE_PANEL_H, SIDE_PANEL_W, barWidth, islandSize, islandX, islandY, isSideDock, layoutPrefs,
   type IslandMode, type IslandViewName,
 } from "../core/layout";
 import { Sound } from "../core/sound";
@@ -46,6 +46,9 @@ export class Island {
   private miniGrid!: HTMLElement;
   private countdown!: HTMLElement;
   private wakeStrip!: HTMLElement;
+  private barStatus!: HTMLElement;
+  private barStatusKey = "";
+  private barShrinkTimer: number | null = null;
 
   private header!: ViewHost;
   private views!: Map<IslandViewName, ViewHost>;
@@ -175,6 +178,7 @@ export class Island {
     this.greetingCanvas = h("canvas", { id: "greeting-canvas" });
     this.miniGrid = h("div", { id: "mini-grid" });
     this.countdown = h("div", { id: "countdown" });
+    this.barStatus = h("div", { id: "bar-status" });
 
     this.header = buildHeader(actions);
     this.views = buildViews(actions, () => this.animateGeometry(false));
@@ -209,6 +213,7 @@ export class Island {
       this.botCanvas,
       this.miniGrid,
       this.countdown,
+      this.barStatus,
     );
 
     const dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -273,6 +278,9 @@ export class Island {
       // nothing while hidden.
       UploadSeq.deactivate();
     }
+    // Only the hidden island is reached through the wake strip. Once it is open the
+    // strip would sit on top of the island's first pixels and swallow the clicks.
+    this.wakeStrip.style.pointerEvents = mode === "hidden" ? "auto" : "none";
     this.updateWindowCollapsed();
     this.animateGeometry(modeOrder(mode) < modeOrder(prev));
     State.notify();
@@ -280,7 +288,8 @@ export class Island {
 
   /** True while the drop sequence owns the island body. */
   private get uploadActive(): boolean {
-    return State.mode === "expanded" && UploadSeq.isActive && UPLOAD_VIEWS.has(State.view);
+    // The 640 px drop animation does not fit the vertical column: plain views take over there.
+    return !isSideDock() && State.mode === "expanded" && UploadSeq.isActive && UPLOAD_VIEWS.has(State.view);
   }
 
   /** Navigating out of the drop flow ends the sequence, as on macOS. */
@@ -330,8 +339,109 @@ export class Island {
     this.expand(view);
   }
 
+  /** Passive "look at me" (work events, integrations). Silent on the folded bar. */
   reveal() {
+    if (this.quietBar) return;
     this.fsm.reveal();
+  }
+
+  private barNotice: { text: string; color: string } | null = null;
+  private barNoticeTimer: number | null = null;
+
+  /**
+   * A passing note on the folded thin bar — what an integration or the calendar
+   * says there instead of opening the island. Gone after `ms`.
+   */
+  notifyBar(text: string, color: string, ms: number) {
+    if (this.barNoticeTimer != null) window.clearTimeout(this.barNoticeTimer);
+    this.barNotice = { text, color };
+    this.barNoticeTimer = window.setTimeout(() => {
+      this.barNoticeTimer = null;
+      this.barNotice = null;
+      State.notify();
+    }, ms);
+    State.notify();
+  }
+
+  /**
+   * Thin-bar look, folded into the bar: Claude Code must not open anything. The
+   * bar itself carries a one-line status instead, and the user opens it when
+   * they choose to.
+   */
+  get quietBar(): boolean {
+    return layoutPrefs.bar && State.mode === "hidden";
+  }
+
+  // ── Bar status line ─────────────────────────────────────────────────────────
+
+  /** What Claude Code is up to, in one line, or null when there's nothing to say. */
+  private barStatusLine(): { text: string; color: string } | null {
+    const claude = State.tasks.find((t) => t.id === "integration_claude");
+    const approval = State.pendingApproval;
+    if (approval) return { text: `Needs permission · ${approval.command}`, color: "#F5A524" };
+    // Short-lived, so it may talk over Claude Code's running status for a moment.
+    if (this.barNotice) return this.barNotice;
+    if (!claude) return null;
+    const step = claude.steps.at(-1);
+    const project = claude.name && claude.name !== "VS Code" ? claude.name : "Claude Code";
+    const withStep = (label: string) => (step ? `${label} · ${step}` : label);
+    switch (claude.state) {
+      case "thinking": return { text: withStep(`${project} is thinking`), color: "#A78BFA" };
+      case "working": return { text: step ? `${project} · ${step}` : `${project} is working`, color: "#3B9EFF" };
+      case "question": return { text: withStep("Question"), color: "#22D3EE" };
+      case "finished": return { text: withStep(`${project} finished`), color: "#34D399" };
+      case "error": return { text: withStep(`${project} stopped on an error`), color: "#F4505E" };
+      case "ratelimit": return { text: "Claude Code hit a rate limit", color: "#F59E0B" };
+      default: return null;
+    }
+  }
+
+  private static measureCtx: CanvasRenderingContext2D | null = null;
+
+  private textWidth(text: string): number {
+    Island.measureCtx ??= document.createElement("canvas").getContext("2d");
+    const ctx = Island.measureCtx;
+    if (!ctx) return text.length * 5.6;
+    ctx.font = getComputedStyle(this.barStatus).font || "500 10px system-ui";
+    return ctx.measureText(text).width;
+  }
+
+  private syncBarStatus() {
+    const line = layoutPrefs.bar ? this.barStatusLine() : null;
+    // The text only shows on the folded bar; the width is kept while the island
+    // is open, so folding back goes straight to the right size.
+    const show = line != null && State.mode === "hidden";
+    const key = `${show}|${line?.color}|${line?.text}`;
+    if (key === this.barStatusKey) return;
+    this.barStatusKey = key;
+
+    if (line) {
+      this.barStatus.replaceChildren(
+        h("i", { style: `background:${line.color};box-shadow:0 0 5px ${line.color}` }),
+        h("span", { text: line.text }),
+      );
+    }
+    this.barStatus.classList.toggle("on", show);
+
+    // dot 5 + gap 6 + side padding 2×12
+    const want = line ? Math.min(BAR_STATUS_MAX_W, Math.ceil(this.textWidth(line.text)) + 35) : 0;
+    if (want === layoutPrefs.barStatusW) return;
+    const growing = want > layoutPrefs.barStatusW;
+    layoutPrefs.barStatusW = want;
+    this.wakeStrip.style.width = `${barWidth()}px`;
+    if (State.mode === "hidden") this.animateGeometry(!growing);
+    // The window is the bar: widen it before the bar grows, narrow it once the
+    // bar has finished shrinking.
+    if (this.barShrinkTimer != null) window.clearTimeout(this.barShrinkTimer);
+    this.barShrinkTimer = null;
+    if (growing) {
+      void Bridge.setBarWidth(barWidth());
+    } else {
+      this.barShrinkTimer = window.setTimeout(() => {
+        this.barShrinkTimer = null;
+        void Bridge.setBarWidth(barWidth());
+      }, 450);
+    }
   }
 
   /** An alert stopped waiting for an answer: let the island auto-close again. */
@@ -451,7 +561,9 @@ export class Island {
 
   private targetSize(): { w: number; h: number; r: number } {
     const { w, h } = islandSize(State.mode, State.view, State.chatHistory.length);
-    const r = State.mode === "expanded" ? EXPANDED_CORNER : ROUNDED_CORNER;
+    const r = State.mode === "expanded"
+      ? EXPANDED_CORNER
+      : layoutPrefs.bar && State.mode === "hidden" ? BAR_H / 2 : ROUNDED_CORNER;
     return { w, h, r };
   }
 
@@ -475,18 +587,34 @@ export class Island {
     const r = this.radius.value;
     this.islandEl.style.width = `${w}px`;
     this.islandEl.style.height = `${hh}px`;
-    this.islandEl.style.borderRadius = `0 0 ${r}px ${r}px`;
-    this.islandEl.style.transform = `translateX(-50%)`;
+    const gap = layoutPrefs.gap;
+    const ix = islandX(w);
+    const iy = islandY();
+    this.islandEl.style.left = `${ix}px`;
+    this.islandEl.style.top = `${iy}px`;
+    // Floating (gap > 0) → fully rounded cloud; glued → square on the docked edge.
+    const dock = layoutPrefs.dock;
+    this.islandEl.style.borderRadius = gap > 0
+      ? `${r}px`
+      : dock === "left" ? `0 ${r}px ${r}px 0`
+      : dock === "right" ? `${r}px 0 0 ${r}px`
+      : `0 0 ${r}px ${r}px`;
+    this.islandEl.style.transform = "none";
     // These follow the island as it resizes, so they belong here rather than in
     // the state-driven DOM sync.
-    this.miniGrid.style.left = `${w - 40 - 14.5}px`;
-    this.miniGrid.style.top = `${hh / 2 - 14.5}px`;
+    if (isSideDock() && State.mode !== "expanded") {
+      this.miniGrid.style.left = `${(w - 29) / 2}px`;
+      this.miniGrid.style.top = `${hh - 29 - 10}px`;
+    } else {
+      this.miniGrid.style.left = `${w - 40 - 14.5}px`;
+      this.miniGrid.style.top = `${hh / 2 - 14.5}px`;
+    }
     this.greetingCanvas.style.left = `${(w - EXPANDED_W) / 2}px`;
     this.uploadCanvas.el.style.left = `${(w - EXPANDED_W) / 2}px`;
 
-    const rect = { x: (PANEL_W - w) / 2, y: 0, w, h: hh };
+    const rect = { x: ix, y: iy, w, h: hh };
     const p = this.pushedRect;
-    if (Math.abs(p.x - rect.x) > 0.5 || Math.abs(p.w - rect.w) > 0.5 || Math.abs(p.h - rect.h) > 0.5) {
+    if (Math.abs(p.y - rect.y) > 0.5 || Math.abs(p.x - rect.x) > 0.5 || Math.abs(p.w - rect.w) > 0.5 || Math.abs(p.h - rect.h) > 0.5) {
       this.pushedRect = rect;
       void Bridge.setIslandRect(rect.x, rect.y, rect.w, rect.h);
     }
@@ -496,7 +624,7 @@ export class Island {
   private islandRect(): { x: number; y: number; w: number; h: number } {
     const w = this.width.value;
     const hh = this.height.value;
-    return { x: (PANEL_W - w) / 2, y: 0, w, h: hh };
+    return { x: islandX(w), y: islandY(), w, h: hh };
   }
 
   // ── Window collapse (hidden → tiny wake strip, zero polling) ────────────────
@@ -526,10 +654,29 @@ export class Island {
 
   private wireInput() {
     // The wake strip is the only thing the OS can hit while the island is hidden.
+    // A short hover delay keeps a cursor sweeping across the browser tab strip
+    // from waking the island by accident.
+    let wakeTimer: number | null = null;
+    const cancelWake = () => {
+      if (wakeTimer != null) window.clearTimeout(wakeTimer);
+      wakeTimer = null;
+    };
     this.wakeStrip.addEventListener("mouseenter", () => {
       Sound.resume();
-      if (State.mode === "hidden") this.fsm.mouseEntered();
+      if (State.mode !== "hidden") return;
+      cancelWake();
+      // The bar is already on screen: touching it answers at once.
+      const delay = layoutPrefs.bar ? 0 : Math.max(0, State.settings.wakeDelay ?? 0);
+      if (delay === 0) {
+        this.fsm.mouseEntered();
+        return;
+      }
+      wakeTimer = window.setTimeout(() => {
+        wakeTimer = null;
+        if (State.mode === "hidden") this.fsm.mouseEntered();
+      }, delay);
     });
+    this.wakeStrip.addEventListener("mouseleave", cancelWake);
 
     this.islandEl.addEventListener("mousedown", (e) => {
       Sound.resume();
@@ -550,6 +697,12 @@ export class Island {
     });
 
     void onDragDrop((e) => this.onDragDrop(e));
+
+    // The window shrinks to the bar and grows back; the bar is centred on the
+    // window it is really in.
+    window.addEventListener("resize", () => {
+      if (layoutPrefs.bar) this.applyGeometry();
+    });
 
     // Outside Tauri (plain browser) drive the cursor from DOM events so the
     // island can be inspected with `npm run dev`.
@@ -574,18 +727,21 @@ export class Island {
       x >= rect.x - HIT_MARGIN && x <= rect.x + rect.w + HIT_MARGIN &&
       y >= rect.y - HIT_MARGIN && y <= rect.y + rect.h + HIT_MARGIN;
 
-    if (inIsland && !this.wasInIsland) {
+    const wasIn = this.wasInIsland;
+    // Set before the FSM runs: its transition handlers consult wasInIsland, and a
+    // hover-triggered expand must not see the cursor as already gone.
+    this.wasInIsland = inIsland;
+    if (inIsland && !wasIn) {
       if (this.fsm.state === "coucou") this.greeting.hover();
       this.fsm.mouseEntered();
       this.homeCollapseAt = null;
     }
-    if (!inIsland && this.wasInIsland) {
-      this.fsm.mouseLeft();
+    if (!inIsland && wasIn) {
+      this.fsm.mouseLeft(true);
       if (this.fsm.state === "home" && !State.isPinned) {
         this.homeCollapseAt = performance.now() + State.settings.autoCloseInterval * 1000;
       }
     }
-    this.wasInIsland = inIsland;
 
     // Bot hover → love
     const overBot = State.mode === "expanded" && State.stateOverride == null && this.isBotHit(x, y);
@@ -804,7 +960,7 @@ export class Island {
   }
 
   private lookY(): number {
-    return -Math.tanh((State.mouse.y - this.botCy.value) / 200);
+    return -Math.tanh((State.mouse.y - (this.islandRect().y + this.botCy.value)) / 200);
   }
 
   private updateCountdown(nowMs: number) {
@@ -849,6 +1005,9 @@ export class Island {
       }
     }
 
+    // Typing in the chat must not be cut short by the cursor drifting off the island.
+    this.fsm.holdOpen = State.view === "prompt";
+
     // Compact mini grid
     const showGrid = State.mode === "compact";
     this.miniGrid.style.opacity = showGrid ? "1" : "0";
@@ -865,6 +1024,8 @@ export class Island {
       }
     }
 
+    this.syncBarStatus();
+
     syncMiniBotStates(State.tasks);
     this.engine.setState(State.effectiveState);
   }
@@ -874,11 +1035,32 @@ export class Island {
     Sound.setEnabled(State.settings.soundEnabled);
     Sound.setVolume(State.settings.soundVolume);
     this.fsm.homeToPetitDelay = State.settings.autoCloseInterval;
+    this.fsm.hoverExpand = State.settings.hoverExpand ?? false;
+    layoutPrefs.compactW = Math.max(150, Math.min(288, State.settings.compactWidth ?? 200));
+    layoutPrefs.dock = State.settings.islandDock ?? "top";
+    // The thin bar only exists on the top edge, glued to it.
+    layoutPrefs.bar = State.settings.islandStyle === "bar" && layoutPrefs.dock === "top";
+    layoutPrefs.gap = layoutPrefs.bar ? 0 : Math.max(0, Math.min(16, State.settings.islandGap ?? 8));
+    this.fsm.barMode = layoutPrefs.bar;
+    this.wakeStrip.dataset.dock = layoutPrefs.dock;
+    if (layoutPrefs.bar) {
+      this.wakeStrip.dataset.bar = "1";
+      this.wakeStrip.style.width = `${barWidth()}px`;
+      this.wakeStrip.style.height = `${BAR_H}px`;
+    } else {
+      delete this.wakeStrip.dataset.bar;
+      this.wakeStrip.style.width = "";
+      this.wakeStrip.style.height = "";
+    }
+    if (isSideDock()) document.documentElement.dataset.side = "1";
+    else delete document.documentElement.dataset.side;
+    this.animateGeometry(false);
+    this.applyGeometry();
     State.notify();
   }
 
   get panelSize() {
-    return { w: PANEL_W, h: PANEL_H };
+    return isSideDock() ? { w: SIDE_PANEL_W, h: SIDE_PANEL_H } : { w: PANEL_W, h: PANEL_H };
   }
 
   get chatHeight() {

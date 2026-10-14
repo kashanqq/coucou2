@@ -61,7 +61,7 @@ final class KeychainStore: @unchecked Sendable {
     private let lock = NSLock()
 
     private static let allKeys = [
-        "anthropic-api-key",
+        "anthropic-api-key", "openai-compat-key",
         "resend-api-key", "resend-from",
         "n8n-url", "n8n-api-key",
         "vercel-token",
@@ -69,6 +69,7 @@ final class KeychainStore: @unchecked Sendable {
         "stripe-api-key",
         "calcom-api-key",
         "notion-api-key",
+        "gcal-client-id", "gcal-client-secret", "gcal-refresh-token",
     ]
 
     private init() {
@@ -100,6 +101,33 @@ final class KeychainStore: @unchecked Sendable {
     }
 }
 
+// MARK: - Chat provider selection
+
+enum ChatProvider: String, CaseIterable, Identifiable {
+    case anthropic, openai, claudeCLI
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .anthropic: return "Anthropic API"
+        case .openai:    return "OpenAI-compatible (DeepSeek, Ollama, OpenRouter…)"
+        case .claudeCLI: return "Claude subscription (local claude CLI)"
+        }
+    }
+
+    static var current: ChatProvider {
+        get { ChatProvider(rawValue: UserDefaults.standard.string(forKey: "chatProvider") ?? "") ?? .anthropic }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: "chatProvider") }
+    }
+
+    static var openAIBaseURL: String {
+        UserDefaults.standard.string(forKey: "openaiBaseURL") ?? "https://api.deepseek.com"
+    }
+    static var openAIModel: String {
+        UserDefaults.standard.string(forKey: "openaiModel") ?? "deepseek-chat"
+    }
+}
+
 // MARK: - Claude API
 
 @MainActor
@@ -115,8 +143,24 @@ final class ClaudeService {
     // Multi-turn conversation messages (for API)
     private var conversationMessages: [[String: Any]] = []
 
+    // Provider-neutral history for OpenAI-compatible providers
+    private var plainMessages: [[String: String]] = []
+    // Session id of the local `claude` CLI conversation
+    private var cliSessionId: String?
+
     func clearConversation() {
         conversationMessages = []
+        plainMessages = []
+        cliSessionId = nil
+    }
+
+    /// True when the selected chat provider can be used right now.
+    var isConfigured: Bool {
+        switch ChatProvider.current {
+        case .anthropic: return !(apiKey ?? "").isEmpty
+        case .openai:    return !ChatProvider.openAIBaseURL.isEmpty
+        case .claudeCLI: return true
+        }
     }
 
     private let systemPrompt = """
@@ -133,6 +177,15 @@ final class ClaudeService {
     // MARK: - Chat (multi-turn, natural text + web search)
 
     func chat(query: String, context: PromptContext?, state: AppState) async {
+        switch ChatProvider.current {
+        case .anthropic: break
+        case .openai:
+            await chatOpenAI(query: query, context: context, state: state)
+            return
+        case .claudeCLI:
+            await chatCLI(query: query, context: context, state: state)
+            return
+        }
         guard let key = apiKey, !key.isEmpty else {
             await showError("API key missing. Open settings.", state: state)
             return
@@ -266,13 +319,147 @@ final class ClaudeService {
             return
         }
 
-        // Add to display history
-        state.chatHistory.append(ChatMessage(role: .assistant, content: text.trimmingCharacters(in: .whitespacesAndNewlines)))
+        deliver(text: text, state: state)
+    }
 
+    private func deliver(text: String, state: AppState) {
+        state.chatHistory.append(ChatMessage(role: .assistant, content: text.trimmingCharacters(in: .whitespacesAndNewlines)))
         state.stateOverride = nil
         state.view = .prompt
         NotificationCenter.default.post(name: .triggerEmote, object: BotEmote.happy)
     }
+
+    // MARK: - Plain-text context (providers without Anthropic content blocks)
+
+    private func plainContext(_ context: PromptContext?, attachFilePath: Bool) -> String? {
+        guard let context else { return nil }
+        switch context {
+        case .window(let app, let title, let url):
+            var text = "Context — App: \(app), Window: \(title)"
+            if let url { text += ", URL: \(url)" }
+            return text
+        case .file(let name, let fileURL):
+            if let fileURL, let block = readFileAsBlock(url: fileURL),
+               block["type"] as? String == "text", let t = block["text"] as? String {
+                return "File: \(name)\n\(t)"
+            }
+            if attachFilePath, let fileURL { return "File: \(fileURL.path)" }
+            return "File: \(name) (content not available with this provider)"
+        }
+    }
+
+    // MARK: - OpenAI-compatible chat (DeepSeek, OpenRouter, Groq, Ollama…)
+
+    private func chatOpenAI(query: String, context: PromptContext?, state: AppState) async {
+        var userText = query
+        if plainMessages.isEmpty, let ctx = plainContext(context, attachFilePath: false) {
+            userText = ctx + "\n\n" + query
+        }
+        plainMessages.append(["role": "user", "content": userText])
+
+        let base = ChatProvider.openAIBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        guard let url = URL(string: base + "/chat/completions") else {
+            plainMessages.removeLast()
+            await showError("Invalid base URL in settings.", state: state)
+            return
+        }
+        let system = systemPrompt.replacingOccurrences(of: "You have web search access and ", with: "You ")
+            + " You have no web access."
+        let body: [String: Any] = [
+            "model": ChatProvider.openAIModel,
+            "max_tokens": 4096,
+            "messages": [["role": "system", "content": system]] + plainMessages,
+        ]
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        if let key = KeychainStore.shared.get("openai-compat-key"), !key.isEmpty {
+            request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        }
+        request.timeoutInterval = 90
+
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                plainMessages.removeLast()
+                await showError(String(data: data, encoding: .utf8) ?? "Request failed.", state: state)
+                return
+            }
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let choices = json["choices"] as? [[String: Any]],
+                  let message = choices.first?["message"] as? [String: Any],
+                  let text = message["content"] as? String, !text.isEmpty else {
+                plainMessages.removeLast()
+                await showError("Unexpected API response.", state: state)
+                return
+            }
+            plainMessages.append(["role": "assistant", "content": text])
+            deliver(text: text, state: state)
+        } catch {
+            plainMessages.removeLast()
+            await showError("Network error: \(error.localizedDescription)", state: state)
+        }
+    }
+
+    // MARK: - Claude subscription via the local `claude` CLI
+
+    private func chatCLI(query: String, context: PromptContext?, state: AppState) async {
+        #if APPSTORE
+        await showError("Claude CLI is not available in the sandboxed App Store build.", state: state)
+        #else
+        var prompt = query
+        if cliSessionId == nil, let ctx = plainContext(context, attachFilePath: true) {
+            prompt = ctx + "\n\n" + query
+        }
+        let session = cliSessionId
+        let system = systemPrompt
+        let result = await Task.detached {
+            Self.runClaudeCLI(prompt: prompt, system: system, session: session)
+        }.value
+        switch result {
+        case .success(let reply):
+            if let newSession = reply.session { cliSessionId = newSession }
+            deliver(text: reply.text, state: state)
+        case .failure(let error):
+            await showError(error.localizedDescription, state: state)
+        }
+        #endif
+    }
+
+    #if !APPSTORE
+    nonisolated private static func runClaudeCLI(prompt: String, system: String, session: String?) -> Result<(text: String, session: String?), NSError> {
+        func fail(_ m: String) -> Result<(text: String, session: String?), NSError> {
+            .failure(NSError(domain: "ClaudeCLI", code: 1, userInfo: [NSLocalizedDescriptionKey: m]))
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        // Login shell so `claude` is found on the user's PATH; values travel via env, never interpolated into the script.
+        process.arguments = ["-lc", #"claude -p "$COUCOU_PROMPT" --output-format json --append-system-prompt "$COUCOU_SYSTEM" ${COUCOU_SESSION:+--resume "$COUCOU_SESSION"}"#]
+        var env = ProcessInfo.processInfo.environment
+        env["COUCOU_PROMPT"] = prompt
+        env["COUCOU_SYSTEM"] = system
+        env["COUCOU_SESSION"] = session ?? ""
+        process.environment = env
+        let out = Pipe(), err = Pipe()
+        process.standardOutput = out
+        process.standardError = err
+        process.standardInput = FileHandle.nullDevice
+        do { try process.run() } catch { return fail("Cannot launch claude: \(error.localizedDescription)") }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 180) { if process.isRunning { process.terminate() } }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        let errData = err.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let text = json["result"] as? String else {
+            let msg = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return fail(msg.isEmpty ? "claude CLI not found or not logged in (run `claude` once in Terminal)." : msg)
+        }
+        if json["is_error"] as? Bool == true { return fail(text) }
+        return .success((text, json["session_id"] as? String))
+    }
+    #endif
 
     // MARK: - Structured result handler
 
