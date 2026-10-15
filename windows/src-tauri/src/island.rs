@@ -251,11 +251,12 @@ pub fn window_rect(mon: (i32, i32, i32, i32), scale: f64, spec: &WindowSpec) -> 
     // The wake strip is horizontal on top, vertical on a side edge. In the thin-bar
     // look the collapsed window is the visible bar itself.
     let (lw, lh) = match (spec.collapsed, side) {
-        // As wide as the panel, so the window never changes width or place while
-        // the island folds: the web view lays out a frame late after a resize, and
-        // any width change shows the bar sideways (or gone) for that frame. The part
-        // beside the bar is cut away with `bar_region` instead.
-        (true, false) if spec.bar => (PANEL_W, BAR_H),
+        // The panel itself: the window never changes size or place while the
+        // island folds and unfolds, only its region does (`bar_outline`). Any
+        // resize shows a stale frame — the web view lays out a frame late (the bar
+        // sideways or gone), and growing from the bar's 11 px Windows stretches
+        // the old surface for a frame, a column of it flashing as a tall line.
+        (true, false) if spec.bar => (PANEL_W, PANEL_H),
         (true, false) => (STRIP_W, STRIP_H),
         (true, true) => (STRIP_H, STRIP_W),
         (false, false) => (PANEL_W, PANEL_H),
@@ -303,8 +304,9 @@ pub fn bar_region(scale: f64, bar_w: f64, window_w: u32) -> (i32, i32) {
 /// any pixel inside it that the web view leaves transparent — or only half covers,
 /// on an anti-aliased edge — shows up white. So the region must hold only pixels
 /// the bar paints solid black; losing a pixel or two of the edge is invisible.
-pub fn bar_outline(scale: f64, bar_w: f64, window_w: u32, h: i32) -> [(i32, i32); 6] {
+pub fn bar_outline(scale: f64, bar_w: f64, window_w: u32) -> [(i32, i32); 6] {
     let (l, r) = bar_region(scale, bar_w, window_w);
+    let h = (BAR_H * scale).floor() as i32;
     let inset = (2.0 * scale).round().max(2.0) as i32;
     let slant = (5.0 * scale).round() as i32;
     let corner = (2.5 * scale).round() as i32;
@@ -340,7 +342,7 @@ pub fn refresh_bar_clip(app: &AppHandle, bar_w: f64) {
     let Some(hwnd) = hwnd_of(&win) else { return };
     let Ok(size) = win.inner_size() else { return };
     let scale = win.scale_factor().unwrap_or(1.0);
-    set_bar_clip(hwnd, Some(bar_outline(scale, bar_w, size.width, size.height as i32)));
+    set_bar_clip(hwnd, Some(bar_outline(scale, bar_w, size.width)));
 }
 
 /// Places and sizes the window. `collapsed` picks the wake strip instead of the panel.
@@ -390,7 +392,7 @@ pub fn apply_geometry(app: &AppHandle, pref: &str, collapsed: bool) {
         }
     }
     if let Some(hwnd) = hwnd_of(&win) {
-        let clip = (bar && collapsed).then(|| bar_outline(scale, bar_w, pw, ph as i32));
+        let clip = (bar && collapsed).then(|| bar_outline(scale, bar_w, pw));
         set_bar_clip(hwnd, clip);
     }
     // Moving across displays can rescale the window: re-assert the physical size.
@@ -601,15 +603,14 @@ mod tests {
     }
 
     #[test]
-    fn window_never_moves_or_resizes_sideways_when_it_collapses() {
+    fn window_never_moves_or_resizes_when_it_collapses() {
         for scale in [1.0, 1.25, 1.5, 2.0] {
             for align in ["center", "left", "right"] {
                 for offset in [0.0, 120.0, -300.0] {
                     let panel = window_rect(MON, scale, &spec(false, 240.0, align, offset));
                     for bar_w in [150.0, 200.0, 240.0, 333.0, 420.0] {
                         let bar = window_rect(MON, scale, &spec(true, bar_w, align, offset));
-                        assert_eq!((bar.0, bar.2), (panel.0, panel.2), "scale {scale} {align} {offset} bar {bar_w}");
-                        assert_eq!(bar.1, panel.1, "bar must stay glued to the top edge");
+                        assert_eq!(bar, panel, "scale {scale} {align} {offset} bar {bar_w}");
                     }
                 }
             }
@@ -638,13 +639,14 @@ mod tests {
     fn bar_outline_stays_inside_the_drawn_bar() {
         for scale in [1.0, 1.25, 1.5, 2.0] {
             let pw = (PANEL_W * scale).round() as u32;
-            let h = (BAR_H * scale).round() as i32;
+            let h = BAR_H * scale;
             for bar_w in [150.0, 240.0, 333.5, 420.0] {
                 // Left edge of the bar the web view draws: centred, in physical px.
                 let drawn_l = (pw as f64 - bar_w * scale) / 2.0;
-                let pts = bar_outline(scale, bar_w, pw, h);
+                let pts = bar_outline(scale, bar_w, pw);
                 for (x, y) in pts {
-                    let slant = 5.0 * scale * y as f64 / h as f64;
+                    assert!(y as f64 <= h, "scale {scale}: {y} below the bar");
+                    let slant = 5.0 * scale * y as f64 / h;
                     let edge = drawn_l + slant;
                     let mirrored = pw as f64 - x as f64;
                     assert!(x as f64 >= edge + 1.0, "scale {scale} bar {bar_w}: {x},{y} vs {edge}");
@@ -655,9 +657,9 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_bar_window_is_as_tall_as_the_bar() {
+    fn collapsed_bar_window_keeps_the_panel_size() {
         let r = window_rect(MON, 1.0, &spec(true, 240.0, "center", 0.0));
-        assert_eq!((r.2, r.3), (PANEL_W as u32, BAR_H as u32));
+        assert_eq!((r.2, r.3), (PANEL_W as u32, PANEL_H as u32));
     }
 
     #[test]
