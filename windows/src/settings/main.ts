@@ -3,7 +3,9 @@
 // integrations land here too in a later stage.
 
 import "./settings.css";
-import { Bridge, onEvent, type CalendarStatus, type CalendarUpdate, type HookStatus } from "../core/bridge";
+import {
+  Bridge, onEvent, type BitrixUpdate, type CalendarStatus, type CalendarUpdate, type HookStatus,
+} from "../core/bridge";
 import { DEFAULT_SETTINGS, type Settings } from "../core/state";
 import { h, clear } from "../views/dom";
 
@@ -517,6 +519,57 @@ function calendarSection(initial: CalendarStatus, secretStored: boolean): HTMLEl
   return h("section", {}, head, body);
 }
 
+// ── Bitrix24 section ──────────────────────────────────────────────────────────
+
+function bitrixSection(): HTMLElement {
+  const head = h("h2", {});
+  const feedback = h("div", {});
+  const input = h("input", {
+    type: "text",
+    value: settings.bitrixTasksPath,
+    placeholder: "C:\\Users\\you\\Documents\\bitrix\\tasks.json",
+    spellcheck: "false",
+    style: "flex:1 1 auto;min-width:0",
+  }) as HTMLInputElement;
+  const saveBtn = h("button", { text: "Save" });
+  saveBtn.addEventListener("click", () => {
+    settings.bitrixTasksPath = input.value.trim();
+    // Rust re-reads the file as soon as the path changes; the event below reports it.
+    void save();
+  });
+
+  function show(update: BitrixUpdate | null) {
+    const ok = !!update?.configured && !update.error;
+    clear(head);
+    head.append(statusDot(ok), h("span", { text: "Bitrix24" }));
+    clear(feedback);
+    if (!update?.configured) return;
+    if (update.error) {
+      feedback.append(h("div", { class: "notice err", text: update.error }));
+    } else if (update.tasks) {
+      feedback.append(h("div", {
+        class: "notice ok",
+        text: `${update.tasks.length} task${update.tasks.length === 1 ? "" : "s"} with a deadline. They're in the island's Bitrix24 tab.`,
+      }));
+    }
+  }
+
+  show(null);
+  void onEvent<BitrixUpdate>("bitrix", show);
+  void Bridge.bitrixRefresh();
+
+  return h("section", {}, head, h("div", { style: "display:flex;flex-direction:column;gap:10px" },
+    h("div", {
+      class: "hint",
+      text: "Coucou only reads a local tasks.json — it never talks to Bitrix24. A script of your own writes the file: "
+        + "an array of {\"title\", \"url\", \"deadline\"} with an RFC 3339 deadline including its time zone, e.g. 2026-10-20T18:00:00+05:00 (an \"id\" is optional). "
+        + "The island shows what is overdue and what is due within two hours, and opens once when a task gets that close.",
+    }),
+    h("div", { class: "row" }, h("label", { style: "min-width:104px", text: "tasks.json" }), input, saveBtn),
+    feedback,
+  ));
+}
+
 // ── General section ───────────────────────────────────────────────────────────
 
 function generalSection(): HTMLElement {
@@ -716,6 +769,7 @@ async function main() {
     apiSection(hasKey),
     integrationsSection(present),
     calendarSection(calendarStatus, (await Bridge.secretPresent("gcal-client-secret")) ?? false),
+    bitrixSection(),
     generalSection(),
     h("div", {
       class: "hint",

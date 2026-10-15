@@ -13,7 +13,7 @@ cd NotchBuddy && xcodegen && open NotchBuddy.xcodeproj
 
 Never edit `NotchBuddy.xcodeproj` by hand: change `project.yml` and run `xcodegen`.
 
-**Windows** (`windows/`): needs [Rust](https://rustup.rs), Node 20+ and the MSVC build tools.
+**Windows** (`windows/`): needs [Rust](https://rustup.rs), Node 20+ (22.18+ to run `npm test`, which uses Node's built-in TypeScript support) and the MSVC build tools.
 
 ```powershell
 cd windows
@@ -43,4 +43,4 @@ See [`windows/README.md`](windows/README.md) for the layout and packaging.
 ## Pull requests
 
 - One topic per PR, with a short GIF or screenshot for anything visual.
-- Build must pass with no new warnings (`xcodebuild` on macOS, `npm run build` + `cargo build` in `windows/` on Windows).
+- Build and tests must pass with no new warnings (`xcodebuild` on macOS; `npm run build`, `npm test` and `cargo test` in `windows/` on Windows).

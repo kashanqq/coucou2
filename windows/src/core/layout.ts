@@ -22,6 +22,7 @@ export type IslandViewName =
   | "note"
   | "settings"
   | "calendar"
+  | "bitrix"
   | "greeting";
 
 export type BotStateName =
@@ -138,6 +139,7 @@ export const VIEW_LAYOUTS: Record<IslandViewName, ViewLayout> = {
   note: { height: 160, botX: 60, botY: null, botDiameter: 50, agentMode: "column" },
   settings: { height: 160, botX: 54, botY: null, botDiameter: 46, agentMode: "none" },
   calendar: { height: 260, botX: 52, botY: null, botDiameter: 44, agentMode: "none" },
+  bitrix: { height: 260, botX: 52, botY: null, botDiameter: 44, agentMode: "none" },
   greeting: { height: 150, botX: 320, botY: 90, botDiameter: 0, agentMode: "none" },
 };
 
@@ -154,7 +156,7 @@ export function chatPromptHeight(messageCount: number): number {
 const SIDE_HEIGHTS: Record<IslandViewName, number> = {
   overview: 350, empty: 240, approval: 320, question: 270, error: 310, finished: 280,
   confused: 220, upload: 250, uploading: 230, choose: 280, mail: 220, prompt: 330,
-  searching: 210, result: 210, note: 230, settings: 320, calendar: 420, greeting: 130,
+  searching: 210, result: 210, note: 230, settings: 320, calendar: 420, bitrix: 420, greeting: 130,
 };
 
 function sideHeight(view: IslandViewName, chatCount: number): number {

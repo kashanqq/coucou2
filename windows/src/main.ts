@@ -7,6 +7,7 @@ import { State, type Settings } from "./core/state";
 import { Island } from "./island/island";
 import { registerHookHandlers } from "./island/hooks";
 import { registerCalendarHandlers } from "./island/calendar";
+import { registerBitrixHandlers } from "./island/bitrix";
 import { registerIntegrationHandlers, refreshConfigured } from "./island/integrations";
 
 async function main() {
@@ -64,6 +65,7 @@ async function main() {
   registerHookHandlers(island);
   registerIntegrationHandlers(island);
   registerCalendarHandlers(island);
+  registerBitrixHandlers(island);
 
   island.launch();
 

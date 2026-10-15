@@ -2,7 +2,7 @@
 
 import type { BotEmoteName, BotStateName, IslandMode, IslandViewName } from "./layout";
 import type { EyeShape } from "../mochi/engine";
-import type { CalendarEvent } from "./bridge";
+import type { BitrixTask, CalendarEvent } from "./bridge";
 
 export type AgentSource = "claudeCode" | "n8n";
 export type PillBadge = "approval" | "finished" | "error";
@@ -115,6 +115,8 @@ export interface Settings {
   islandOffsetY: number;
   /** "island" = the floating cloud that appears on demand; "bar" = a thin black bar that is always there. */
   islandStyle: "island" | "bar";
+  /** Local tasks.json with Bitrix24 deadlines. Empty = no Bitrix tab content. */
+  bitrixTasksPath: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -141,6 +143,7 @@ export const DEFAULT_SETTINGS: Settings = {
   islandDock: "top",
   islandOffsetY: 160,
   islandStyle: "island",
+  bitrixTasksPath: "",
 };
 
 type Listener = () => void;
@@ -182,6 +185,15 @@ class AppState {
     error: string | null;
     syncedAt: number | null;
   } = { connected: false, events: [], error: null, syncedAt: null };
+
+  /** Bitrix24 tasks, as last read from tasks.json by Rust. */
+  bitrix: {
+    configured: boolean;
+    tasks: BitrixTask[];
+    error: string | null;
+    /** When the file was last written, Unix ms. */
+    syncedAt: number | null;
+  } = { configured: false, tasks: [], error: null, syncedAt: null };
 
   lastActivity = performance.now();
 

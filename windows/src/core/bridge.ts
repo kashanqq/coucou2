@@ -6,6 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { Settings } from "./state";
+import type { DeadlineTask } from "./deadlines";
 
 export const IS_TAURI =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -108,7 +109,22 @@ export const Bridge = {
   /** Syncs now; the result arrives as a `calendar` event. */
   calendarRefresh: () => call<void>("calendar_refresh"),
   calendarStatus: () => call<CalendarStatus>("calendar_status"),
+
+  // ── Bitrix24 ──────────────────────────────────────────────────────────────
+  /** Re-reads tasks.json; the result arrives as a `bitrix` event. */
+  bitrixRefresh: () => call<void>("bitrix_refresh"),
 };
+
+/** One task from tasks.json: id, title, link and RFC 3339 deadline. */
+export type BitrixTask = DeadlineTask;
+
+export interface BitrixUpdate {
+  configured: boolean;
+  /** null when the file couldn't be read — keep what is already shown. */
+  tasks: BitrixTask[] | null;
+  error: string | null;
+  syncedAt: number | null;
+}
 
 export interface CalendarStatus {
   connected: boolean;

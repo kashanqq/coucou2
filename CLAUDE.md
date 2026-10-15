@@ -37,6 +37,8 @@ npm install
 npm run tauri dev   # dev build with live reload
 npm run dev         # front end only, in a browser
 npm run build       # tsc --noEmit + vite build
+npm test            # node --test on src/**/*.test.ts (Node 22.18+)
+cargo test          # Rust unit tests
 npm run pack        # installer into windows/release/
 npm run icons       # regenerate src-tauri/icons
 ```

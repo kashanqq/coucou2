@@ -1,5 +1,6 @@
 // Coucou for Windows — app wiring and the commands the island calls.
 
+mod bitrix;
 mod calendar;
 mod claude;
 mod files;
@@ -62,7 +63,7 @@ fn boot(app: AppHandle, shared: State<Shared>) -> BootInfo {
 
 #[tauri::command]
 fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
-    let (screen_changed, autostart_changed) = {
+    let (screen_changed, autostart_changed, bitrix_changed) = {
         let mut current = shared.settings.lock().unwrap();
         let screen_changed = current.screen != settings.screen
             || current.island_align != settings.island_align
@@ -71,11 +72,15 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
             || current.island_offset_y != settings.island_offset_y
             || current.island_style != settings.island_style;
         let autostart_changed = current.autostart != settings.autostart;
+        let bitrix_changed = current.bitrix_tasks_path != settings.bitrix_tasks_path;
         *current = settings.clone();
-        (screen_changed, autostart_changed)
+        (screen_changed, autostart_changed, bitrix_changed)
     };
     if let Err(err) = settings::save(&settings) {
         eprintln!("[coucou] could not save settings: {err}");
+    }
+    if bitrix_changed {
+        bitrix::check(&app, true);
     }
     if autostart_changed {
         let manager = app.autolaunch();
@@ -343,6 +348,14 @@ fn calendar_status() -> calendar::CalendarStatus {
     calendar::status()
 }
 
+// ── Bitrix24 ──────────────────────────────────────────────────────────────────
+
+/// Re-sends the task list; the result arrives as a `bitrix` event.
+#[tauri::command]
+fn bitrix_refresh(app: AppHandle) {
+    bitrix::check(&app, true);
+}
+
 /// Opens the configured n8n instance — the URL lives in the Credential Manager.
 #[tauri::command]
 fn open_n8n() {
@@ -476,6 +489,7 @@ pub fn run() {
             calendar_disconnect,
             calendar_refresh,
             calendar_status,
+            bitrix_refresh,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -497,6 +511,7 @@ pub fn run() {
             pipe::start(handle.clone());
             integrations::start(handle.clone());
             calendar::start(handle.clone());
+            bitrix::start(handle.clone());
             Ok(())
         })
         .run(tauri::generate_context!())
