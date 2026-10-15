@@ -8,12 +8,21 @@
 //
 // The client ID, client secret and refresh token live in the Credential Manager;
 // the short-lived access token only in memory. The scope is read-only.
+//
+// Google's push notifications (events.watch) need a public HTTPS server to call,
+// which a desktop app doesn't have, so the sync asks instead, but cheaply: a
+// sync token per calendar lets a check ask "anything changed?" and get an empty
+// answer back. The full week is downloaded only when something did change, when
+// the window has moved on, or on the refresh button. The last week downloaded
+// is kept in calendar.json, so the island still has it offline and at launch.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -37,15 +46,48 @@ const REVOKE_URL: &str = "https://oauth2.googleapis.com/revoke";
 const API: &str = "https://www.googleapis.com/calendar/v3";
 const SCOPE: &str = "https://www.googleapis.com/auth/calendar.readonly";
 
-const SYNC_EVERY: Duration = Duration::from_secs(120);
+/// How often to ask whether anything changed (an empty answer when nothing did).
+const CHECK_EVERY_MS: u64 = 5 * 60 * 1000;
+/// How often the timer looks at the clock. Short, so a wake or a returning
+/// network is noticed within a minute; each look costs nothing.
+const TICK: Duration = Duration::from_secs(60);
+const OFFLINE: &str = "Offline — showing the last sync.";
+/// The window (a day and a half back, eight days ahead) slides with time, so
+/// the week is downloaded again at least this often even if nothing changed.
+const FULL_EVERY_MS: u64 = 6 * 3600 * 1000;
 /// How long the browser has to come back with the code.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
-/// Calendars beyond this are skipped: one request each, every two minutes.
+/// Calendars beyond this are skipped: one request each per check.
 const MAX_CALENDARS: usize = 12;
+/// Pages of 250 events per calendar on a full download.
+const MAX_PAGES: usize = 4;
 
 /// Access token and the moment it stops being usable.
 static ACCESS: Mutex<Option<(String, Instant)>> = Mutex::new(None);
 static SIGNING_IN: AtomicBool = AtomicBool::new(false);
+/// What the last full download produced; mirrored in calendar.json.
+static CACHE: Mutex<Option<Cache>> = Mutex::new(None);
+/// The last update sent, for a window that asks after it was emitted.
+static LAST: Mutex<Option<CalendarUpdate>> = Mutex::new(None);
+/// One sync at a time: the timer and the refresh button can't overlap.
+static SYNC_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// (wall-clock ms, error) of the last failed sync; cleared by a good one.
+static FAILED: Mutex<Option<(u64, String)>> = Mutex::new(None);
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct Cache {
+    events: Vec<Value>,
+    /// Unix ms of the last full download.
+    fetched_at: u64,
+    /// Unix ms of the last time Google confirmed it's current (download or check).
+    #[serde(default)]
+    checked_at: u64,
+    /// Sync token of the calendar list, when Google gave one.
+    list_token: Option<String>,
+    /// (calendar id, its events sync token) for every calendar downloaded.
+    tokens: Vec<(String, Option<String>)>,
+}
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -75,8 +117,54 @@ pub fn status() -> CalendarStatus {
 }
 
 fn emit(app: &AppHandle, update: CalendarUpdate) {
+    *LAST.lock().unwrap() = Some(update.clone());
     // Both windows: the island shows the events, the settings window the status.
     let _ = app.emit("calendar", update);
+}
+
+/// What the island should show right now: the cached week before any network.
+pub fn snapshot() -> CalendarUpdate {
+    if let Some(last) = LAST.lock().unwrap().clone() {
+        return last;
+    }
+    CalendarUpdate { events: Some(vec![]), ..cached_update(None) }
+}
+
+/// The cached week as an update. Without a cache, `events` is None, which
+/// keeps whatever the island already shows.
+fn cached_update(error: Option<String>) -> CalendarUpdate {
+    let cache = CACHE.lock().unwrap().clone();
+    CalendarUpdate {
+        connected: secrets::present(REFRESH_KEY),
+        events: cache.as_ref().map(|c| c.events.clone()),
+        error,
+        synced_at: cache.map(|c| c.checked_at.max(c.fetched_at)),
+    }
+}
+
+fn cache_path() -> PathBuf {
+    crate::settings::local_dir().join("calendar.json")
+}
+
+fn load_cache() -> Option<Cache> {
+    let text = std::fs::read_to_string(cache_path()).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Written next to itself and renamed, so a crash never leaves half a file.
+fn save_cache(cache: &Cache) {
+    let path = cache_path();
+    let tmp = path.with_extension("json.tmp");
+    let Ok(json) = serde_json::to_vec(cache) else { return };
+    let _ = std::fs::create_dir_all(crate::settings::local_dir());
+    if std::fs::write(&tmp, json).is_err() || std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+fn forget_cache() {
+    *CACHE.lock().unwrap() = None;
+    let _ = std::fs::remove_file(cache_path());
 }
 
 fn client() -> reqwest::Client {
@@ -93,19 +181,50 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Syncs every two minutes while connected. Paused means no network at all.
+/// Shows the cached week at once, then checks for changes every five minutes
+/// while connected. Paused means no network at all.
+///
+/// The five minutes are counted on the wall clock from the last check Google
+/// answered, which calendar.json keeps: sleep, a shutdown or a day offline all
+/// count, so the first tick after any of them checks straight away. A tick is
+/// one comparison in memory; offline, each tick tries again (a failed DNS
+/// lookup), so the week comes back within a minute of the network.
 pub fn start(app: AppHandle) {
+    if !secrets::present(REFRESH_KEY) {
+        forget_cache();
+    } else if let Some(cache) = load_cache() {
+        *CACHE.lock().unwrap() = Some(cache);
+        emit(&app, cached_update(None));
+    }
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_secs(4)).await;
-        let mut ticker = tokio::time::interval(SYNC_EVERY);
+        let mut ticker = tokio::time::interval(TICK);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
-            if crate::integrations::PAUSED.load(Ordering::Relaxed) || !secrets::present(REFRESH_KEY) {
+            if crate::integrations::PAUSED.load(Ordering::Relaxed) {
                 continue;
             }
-            sync(&app).await;
+            let checked = CACHE.lock().unwrap().as_ref().map(|c| c.checked_at.max(c.fetched_at));
+            let failed = FAILED.lock().unwrap().as_ref().map(|(at, error)| (*at, error == OFFLINE));
+            if !is_due(now_ms(), checked, failed) || !secrets::present(REFRESH_KEY) {
+                continue;
+            }
+            sync_now(&app, false).await;
         }
     });
+}
+
+/// Whether the timer should check now. `checked`: wall-clock ms of the last
+/// check Google answered. `failed`: the last failed try, and whether it failed
+/// for want of a network. A clock set back counts as due.
+fn is_due(now: u64, checked: Option<u64>, failed: Option<(u64, bool)>) -> bool {
+    let within = |at: u64| at <= now && now - at < CHECK_EVERY_MS;
+    if checked.is_some_and(within) {
+        return false;
+    }
+    // Google said no (not the network): wait the full interval before asking again.
+    !matches!(failed, Some((at, false)) if within(at))
 }
 
 // ── Sign-in ──────────────────────────────────────────────────────────────────
@@ -125,6 +244,7 @@ pub async fn connect(app: AppHandle) -> Result<(), String> {
     secrets::set(REFRESH_KEY, &refresh)?;
     *ACCESS.lock().unwrap() = Some((access, Instant::now() + expires_in));
     log::line("google calendar connected".to_string());
+    forget_cache();
     sync(&app).await;
     Ok(())
 }
@@ -269,6 +389,7 @@ pub async fn disconnect(app: &AppHandle) {
     }
     let _ = secrets::clear(REFRESH_KEY);
     *ACCESS.lock().unwrap() = None;
+    forget_cache();
     log::line("google calendar disconnected".to_string());
     emit(app, CalendarUpdate { connected: false, events: Some(vec![]), error: None, synced_at: None });
 }
@@ -292,7 +413,7 @@ async fn access_token(http: &reqwest::Client) -> Result<String, String> {
         ])
         .send()
         .await
-        .map_err(|e| format!("No connection: {e}"))?;
+        .map_err(net_error)?;
     let status = response.status();
     let json: Value = response.json().await.unwrap_or(json!({}));
     if !status.is_success() {
@@ -329,27 +450,120 @@ fn google_error(json: &Value, fallback: &str) -> String {
 
 // ── Sync ─────────────────────────────────────────────────────────────────────
 
+/// The refresh button and a new connection: always the full week.
 pub async fn sync(app: &AppHandle) {
+    sync_now(app, true).await;
+}
+
+/// The timer's check: the full week only if something changed or it's stale.
+async fn sync_now(app: &AppHandle, force: bool) {
+    let _one_at_a_time = SYNC_LOCK.lock().await;
     if !secrets::present(REFRESH_KEY) {
+        forget_cache();
         emit(app, CalendarUpdate { connected: false, events: Some(vec![]), error: None, synced_at: None });
         return;
     }
-    match fetch_events().await {
-        Ok(events) => emit(app, CalendarUpdate {
-            connected: true,
-            events: Some(events),
-            error: None,
-            synced_at: Some(now_ms()),
-        }),
-        Err(error) => {
-            log::line(format!("google calendar: {error}"));
-            emit(app, CalendarUpdate {
-                connected: secrets::present(REFRESH_KEY),
-                events: None,
-                error: Some(error),
-                synced_at: None,
-            });
+    let http = client();
+    let result = async {
+        let token = access_token(&http).await?;
+        let cached = CACHE.lock().unwrap().clone();
+        if let Some(cache) = cached.filter(|c| !force && now_ms().saturating_sub(c.fetched_at) < FULL_EVERY_MS) {
+            if let Some(cache) = unchanged(&http, &token, cache).await? {
+                return Ok(cache);
+            }
         }
+        fetch_all(&http, &token).await
+    }
+    .await;
+    match result {
+        Ok(mut cache) => {
+            *FAILED.lock().unwrap() = None;
+            cache.checked_at = now_ms();
+            save_cache(&cache);
+            *CACHE.lock().unwrap() = Some(cache);
+            emit(app, cached_update(None));
+        }
+        Err(error) => {
+            // Offline, this repeats every minute: log and re-send it only once.
+            let repeat = {
+                let mut failed = FAILED.lock().unwrap();
+                let repeat = failed.as_ref().is_some_and(|(_, last)| *last == error);
+                *failed = Some((now_ms(), error.clone()));
+                repeat
+            };
+            if repeat {
+                return;
+            }
+            log::line(format!("google calendar: {error}"));
+            if !secrets::present(REFRESH_KEY) {
+                forget_cache();
+                emit(app, CalendarUpdate { connected: false, events: Some(vec![]), error: Some(error), synced_at: None });
+                return;
+            }
+            // Keep showing the last week downloaded, with the reason it isn't newer.
+            emit(app, cached_update(Some(error)));
+        }
+    }
+}
+
+/// Asks the calendar list and every calendar what changed since the last
+/// download. Some(cache with fresh tokens) when nothing did; None when the week
+/// must be downloaded again.
+async fn unchanged(http: &reqwest::Client, token: &str, mut cache: Cache) -> Result<Option<Cache>, String> {
+    let Some(list_token) = cache.list_token.clone() else { return Ok(None) };
+    let mut url = reqwest::Url::parse(&format!("{API}/users/me/calendarList")).map_err(|e| e.to_string())?;
+    url.query_pairs_mut().append_pair("syncToken", &list_token).append_pair("maxResults", "1");
+    match changes(http, token, url).await? {
+        Some(next) => cache.list_token = Some(next),
+        None => return Ok(None),
+    }
+    for (id, sync_token) in cache.tokens.iter_mut() {
+        let Some(current) = sync_token.clone() else { return Ok(None) };
+        let mut url = events_url(id)?;
+        url.query_pairs_mut()
+            .append_pair("syncToken", &current)
+            .append_pair("singleEvents", "true")
+            .append_pair("maxResults", "1");
+        match changes(http, token, url).await? {
+            Some(next) => *sync_token = Some(next),
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(cache))
+}
+
+/// One incremental request: Some(next sync token) when nothing changed, None
+/// when something did or the token has expired (410 Gone).
+async fn changes(http: &reqwest::Client, token: &str, url: reqwest::Url) -> Result<Option<String>, String> {
+    let response = http.get(url).bearer_auth(token).send().await.map_err(net_error)?;
+    let status = response.status();
+    if status.as_u16() == 410 {
+        return Ok(None);
+    }
+    let json: Value = response.json().await.unwrap_or(json!({}));
+    if !status.is_success() {
+        if status.as_u16() == 401 {
+            *ACCESS.lock().unwrap() = None;
+        }
+        return Err(google_error(&json, &format!("Google Calendar error {}", status.as_u16())));
+    }
+    Ok(next_if_unchanged(&json))
+}
+
+/// The next sync token from an incremental answer that reports no change.
+fn next_if_unchanged(json: &Value) -> Option<String> {
+    let empty = json.get("items").and_then(Value::as_array).is_none_or(|items| items.is_empty());
+    if !empty || json.get("nextPageToken").is_some() {
+        return None;
+    }
+    json.get("nextSyncToken").and_then(Value::as_str).map(str::to_string)
+}
+
+fn net_error(e: reqwest::Error) -> String {
+    if e.is_connect() || e.is_timeout() {
+        OFFLINE.into()
+    } else {
+        format!("No connection: {e}")
     }
 }
 
@@ -359,7 +573,7 @@ async fn get_json(http: &reqwest::Client, token: &str, url: reqwest::Url) -> Res
         .bearer_auth(token)
         .send()
         .await
-        .map_err(|e| format!("No connection: {e}"))?;
+        .map_err(net_error)?;
     let status = response.status();
     let json: Value = response.json().await.unwrap_or(json!({}));
     if status.is_success() {
@@ -371,24 +585,38 @@ async fn get_json(http: &reqwest::Client, token: &str, url: reqwest::Url) -> Res
     Err(google_error(&json, &format!("Google Calendar error {}", status.as_u16())))
 }
 
-/// Events from every calendar ticked in Google Calendar, from a day and a half
-/// ago (so "today" is covered in any time zone) to eight days ahead.
-async fn fetch_events() -> Result<Vec<Value>, String> {
-    let http = client();
-    let token = access_token(&http).await?;
+fn events_url(calendar_id: &str) -> Result<reqwest::Url, String> {
+    let mut url = reqwest::Url::parse(&format!("{API}/calendars/")).map_err(|e| e.to_string())?;
+    url.path_segments_mut()
+        .map_err(|_| "bad calendar URL".to_string())?
+        .pop_if_empty()
+        .push(calendar_id)
+        .push("events");
+    Ok(url)
+}
 
-    let list_url = reqwest::Url::parse_with_params(
-        &format!("{API}/users/me/calendarList"),
-        &[("minAccessRole", "reader")],
-    )
-    .map_err(|e| e.to_string())?;
-    let list = get_json(&http, &token, list_url).await?;
+/// Events from every calendar ticked in Google Calendar, from a day and a half
+/// ago (so "today" is covered in any time zone) to eight days ahead, plus the
+/// sync tokens the next checks start from. No orderBy and no minAccessRole:
+/// neither can be combined with a sync token, and the island sorts anyway.
+async fn fetch_all(http: &reqwest::Client, token: &str) -> Result<Cache, String> {
+    let list_url = reqwest::Url::parse(&format!("{API}/users/me/calendarList")).map_err(|e| e.to_string())?;
+    let list = get_json(http, token, list_url).await?;
+    let list_token = list
+        .get("nextSyncToken")
+        .and_then(Value::as_str)
+        .filter(|_| list.get("nextPageToken").is_none())
+        .map(str::to_string);
     let calendars: Vec<(String, String, String)> = list
         .get("items")
         .and_then(Value::as_array)
         .map(|items| {
             items
                 .iter()
+                .filter(|c| {
+                    // Free/busy-only calendars have no events to read.
+                    matches!(c.get("accessRole").and_then(Value::as_str), Some("reader" | "writer" | "owner"))
+                })
                 .filter(|c| {
                     c.get("selected").and_then(Value::as_bool).unwrap_or(false)
                         || c.get("primary").and_then(Value::as_bool).unwrap_or(false)
@@ -414,24 +642,34 @@ async fn fetch_events() -> Result<Vec<Value>, String> {
     let time_max = rfc3339(now + 8 * 86400);
 
     let mut events = Vec::new();
+    let mut tokens = Vec::new();
     for (id, name, color) in &calendars {
-        let mut url = reqwest::Url::parse(&format!("{API}/calendars/")).map_err(|e| e.to_string())?;
-        url.path_segments_mut()
-            .map_err(|_| "bad calendar URL".to_string())?
-            .pop_if_empty()
-            .push(id)
-            .push("events");
-        url.query_pairs_mut()
-            .append_pair("timeMin", &time_min)
-            .append_pair("timeMax", &time_max)
-            .append_pair("singleEvents", "true")
-            .append_pair("orderBy", "startTime")
-            .append_pair("maxResults", "100");
-        let json = get_json(&http, &token, url).await?;
-        let Some(items) = json.get("items").and_then(Value::as_array) else { continue };
-        events.extend(items.iter().filter_map(|e| parse_event(e, id, name, color)));
+        let mut page: Option<String> = None;
+        let mut sync_token = None;
+        for _ in 0..MAX_PAGES {
+            let mut url = events_url(id)?;
+            url.query_pairs_mut()
+                .append_pair("timeMin", &time_min)
+                .append_pair("timeMax", &time_max)
+                .append_pair("singleEvents", "true")
+                .append_pair("maxResults", "250");
+            if let Some(page) = &page {
+                url.query_pairs_mut().append_pair("pageToken", page);
+            }
+            let json = get_json(http, token, url).await?;
+            if let Some(items) = json.get("items").and_then(Value::as_array) {
+                events.extend(items.iter().filter_map(|e| parse_event(e, id, name, color)));
+            }
+            page = json.get("nextPageToken").and_then(Value::as_str).map(str::to_string);
+            if page.is_none() {
+                // Only the last page carries it; without one, every check downloads again.
+                sync_token = json.get("nextSyncToken").and_then(Value::as_str).map(str::to_string);
+                break;
+            }
+        }
+        tokens.push((id.clone(), sync_token));
     }
-    Ok(events)
+    Ok(Cache { events, fetched_at: now_ms(), checked_at: 0, list_token, tokens })
 }
 
 fn parse_event(e: &Value, calendar_id: &str, calendar: &str, color: &str) -> Option<Value> {
@@ -534,4 +772,79 @@ fn rfc3339(secs: u64) -> String {
         rem % 3600 / 60,
         rem % 60
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_incremental_answer_means_unchanged() {
+        let json = json!({"items": [], "nextSyncToken": "t2"});
+        assert_eq!(next_if_unchanged(&json), Some("t2".into()));
+    }
+
+    #[test]
+    fn any_item_means_changed() {
+        let json = json!({"items": [{"id": "e1", "status": "cancelled"}], "nextSyncToken": "t2"});
+        assert_eq!(next_if_unchanged(&json), None);
+    }
+
+    #[test]
+    fn more_pages_mean_changed() {
+        assert_eq!(next_if_unchanged(&json!({"items": [], "nextPageToken": "p2"})), None);
+    }
+
+    #[test]
+    fn no_token_means_download_again() {
+        assert_eq!(next_if_unchanged(&json!({"items": []})), None);
+    }
+
+    #[test]
+    fn the_cache_survives_a_round_trip() {
+        let cache = Cache {
+            events: vec![json!({"id": "e1", "title": "Standup"})],
+            fetched_at: 1,
+            checked_at: 2,
+            list_token: Some("l".into()),
+            tokens: vec![("primary".into(), Some("t".into())), ("other".into(), None)],
+        };
+        let back: Cache = serde_json::from_slice(&serde_json::to_vec(&cache).unwrap()).unwrap();
+        assert_eq!(back.events, cache.events);
+        assert_eq!(back.tokens, cache.tokens);
+        assert_eq!((back.fetched_at, back.checked_at, back.list_token), (1, 2, Some("l".into())));
+    }
+
+    const MIN: u64 = 60_000;
+
+    #[test]
+    fn due_once_five_wall_clock_minutes_have_passed() {
+        let now = 1_000 * MIN;
+        assert!(is_due(now, None, None), "never synced");
+        assert!(!is_due(now, Some(now - 4 * MIN), None));
+        assert!(is_due(now, Some(now - 5 * MIN), None));
+        // Checked 20 min before an hour of sleep: due on the first tick after.
+        assert!(is_due(now, Some(now - 80 * MIN), None));
+    }
+
+    #[test]
+    fn offline_tries_every_tick_but_google_errors_wait() {
+        let now = 1_000 * MIN;
+        let old = Some(now - 30 * MIN);
+        assert!(is_due(now, old, Some((now - MIN, true))), "offline: try again");
+        assert!(!is_due(now, old, Some((now - MIN, false))), "Google refused: wait");
+        assert!(is_due(now, old, Some((now - 6 * MIN, false))));
+    }
+
+    #[test]
+    fn a_clock_set_back_counts_as_due() {
+        let now = 1_000 * MIN;
+        assert!(is_due(now, Some(now + 60 * MIN), None));
+    }
+
+    #[test]
+    fn rfc3339_formats_utc() {
+        assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339(1_792_050_600), "2026-10-15T07:50:00Z");
+    }
 }

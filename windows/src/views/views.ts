@@ -10,6 +10,8 @@ import { washRGBA, type IslandViewName, type Wash } from "../core/layout";
 import { createMiniBot, pruneMiniBots } from "../mochi/minibots";
 import { buildPrompt } from "./chat";
 import { buildCalendar } from "./calendar";
+import { buildBitrix } from "./bitrix";
+import { needsAttention } from "../core/deadlines";
 import { buildChoose, buildUpload, buildUploading } from "./upload";
 import { renderIntegrationCard, type IntegrationCardHooks } from "./integrations";
 
@@ -82,6 +84,7 @@ export function buildHeader(actions: ViewActions): ViewHost {
   const tabHome = h("button", { class: "tab", title: "Overview", onclick: () => go("overview") }, svg(ICONS.house, 13));
   const tabChat = h("button", { class: "tab", title: "Ask", onclick: () => go("prompt") }, svg(ICONS.bubble, 13));
   const tabCal = h("button", { class: "tab", title: "Calendar", onclick: () => go("calendar") }, svg(ICONS.calendar, 13));
+  const tabBitrix = h("button", { class: "tab", title: "Bitrix24", onclick: () => go("bitrix") }, svg(ICONS.checklist, 13));
   const tabDrop = h("button", { class: "tab", title: "Drop", onclick: () => go("upload") }, svg(ICONS.plus, 13));
 
   const gearBtn = h("button", { title: "Settings", onclick: () => go("settings") }, svg(ICONS.gear, 14));
@@ -95,7 +98,7 @@ export function buildHeader(actions: ViewActions): ViewHost {
   const el = h(
     "div",
     { id: "header" },
-    h("div", { class: "tabs" }, tabHome, tabChat, tabCal, tabDrop),
+    h("div", { class: "tabs" }, tabHome, tabChat, tabCal, tabBitrix, tabDrop),
     h("div", { class: "header-actions" }, gearBtn, soundBtn),
   );
 
@@ -106,6 +109,9 @@ export function buildHeader(actions: ViewActions): ViewHost {
       tabHome.classList.toggle("on", v === "overview" || v === "empty");
       tabChat.classList.toggle("on", v === "prompt");
       tabCal.classList.toggle("on", v === "calendar");
+      tabBitrix.classList.toggle("on", v === "bitrix");
+      // Something overdue or due within two hours: the tab says so even when closed.
+      tabBitrix.classList.toggle("alert", needsAttention(State.bitrix.tasks, Date.now()));
       tabDrop.classList.toggle("on", v === "upload");
       gearBtn.classList.toggle("on", v === "settings");
       clear(gearBtn);
@@ -502,6 +508,7 @@ export function buildViews(
   map.set("settings", buildSettings(actions));
   map.set("prompt", buildPrompt(onChatHeightChange));
   map.set("calendar", buildCalendar(actions));
+  map.set("bitrix", buildBitrix(actions));
   map.set("upload", buildUpload());
   map.set("uploading", buildUploading());
   map.set("choose", buildChoose(actions));

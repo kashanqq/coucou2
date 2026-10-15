@@ -7,6 +7,7 @@ import { State, type Settings } from "./core/state";
 import { Island } from "./island/island";
 import { registerHookHandlers } from "./island/hooks";
 import { registerCalendarHandlers } from "./island/calendar";
+import { registerBitrixHandlers } from "./island/bitrix";
 import { registerIntegrationHandlers, refreshConfigured } from "./island/integrations";
 
 async function main() {
@@ -53,6 +54,11 @@ async function main() {
 
   await onEvent<null>("screen-changed", () => void Bridge.reposition());
 
+  // A full-screen app is up: slide off the edge, and back when it ends.
+  await onEvent<boolean>("fullscreen", (away) => {
+    document.getElementById("root")?.classList.toggle("away", away);
+  });
+
   // The settings window writes preferences; apply them here without a restart.
   await onEvent<Settings>("settings-changed", (s) => {
     State.settings = { ...State.settings, ...s };
@@ -64,6 +70,7 @@ async function main() {
   registerHookHandlers(island);
   registerIntegrationHandlers(island);
   registerCalendarHandlers(island);
+  registerBitrixHandlers(island);
 
   island.launch();
 

@@ -19,8 +19,8 @@ use windows::Win32::System::Ole::RevokeDragDrop;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GetClassNameW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW,
+    GetCursorPos, GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, SWP_NOACTIVATE,
+    SWP_NOZORDER, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 
 /// Logical size of the full window — the largest island view, like the macOS panel.
@@ -32,8 +32,8 @@ pub const SIDE_PANEL_H: f64 = 560.0;
 /// Logical size of the invisible strip that wakes the island when it is hidden.
 pub const STRIP_W: f64 = 240.0;
 pub const STRIP_H: f64 = 6.0;
-/// Thin-bar look: the collapsed window is the 15 px bar the island shows when idle.
-pub const BAR_H: f64 = 15.0;
+/// Thin-bar look: the collapsed window is the 11 px bar the island shows when idle.
+pub const BAR_H: f64 = 11.0;
 /// Default and widest collapsed-bar window; the front end widens the bar to fit
 /// a Claude Code status line (`set_bar_width`).
 pub const BAR_WIN_W: f64 = 240.0;
@@ -231,6 +231,118 @@ pub fn screen_info(app: &AppHandle, pref: &str) -> ScreenInfo {
     }
 }
 
+/// What `window_rect` needs to know besides the monitor.
+pub struct WindowSpec<'a> {
+    pub dock: &'a str,
+    pub align: &'a str,
+    pub offset_x: f64,
+    pub offset_y: f64,
+    /// Thin-bar look on the top edge.
+    pub bar: bool,
+    pub collapsed: bool,
+}
+
+/// Window rectangle `(x, y, width, height)` in physical pixels on a monitor given
+/// as `(x, y, width, height)`. Pure, so the placement can be tested: the bar must
+/// stay exactly where the panel's island is when the window grows and shrinks.
+pub fn window_rect(mon: (i32, i32, i32, i32), scale: f64, spec: &WindowSpec) -> (i32, i32, u32, u32) {
+    let (mx, my, mw, mh) = mon;
+    let side = spec.dock == "left" || spec.dock == "right";
+    // The wake strip is horizontal on top, vertical on a side edge. In the thin-bar
+    // look the collapsed window is the visible bar itself.
+    let (lw, lh) = match (spec.collapsed, side) {
+        // As wide as the panel, so the window never changes width or place while
+        // the island folds: the web view lays out a frame late after a resize, and
+        // any width change shows the bar sideways (or gone) for that frame. The part
+        // beside the bar is cut away with `bar_region` instead.
+        (true, false) if spec.bar => (PANEL_W, BAR_H),
+        (true, false) => (STRIP_W, STRIP_H),
+        (true, true) => (STRIP_H, STRIP_W),
+        (false, false) => (PANEL_W, PANEL_H),
+        (false, true) => (SIDE_PANEL_W, SIDE_PANEL_H),
+    };
+    let pw = (lw * scale).round().max(1.0) as u32;
+    let ph = (lh * scale).round().max(1.0) as u32;
+    let anchor_w = pw as i32;
+    let free = (mw - anchor_w).max(0);
+    let base = match spec.align {
+        "left" => 0,
+        "right" => free,
+        _ => free / 2,
+    };
+    // Keep the window on its monitor whatever the offset, or it becomes unreachable.
+    let rel = match spec.dock {
+        "left" => 0,
+        "right" => free,
+        _ => (base + (spec.offset_x * scale).round() as i32).clamp(0, free),
+    };
+    let x = mx + rel;
+    let y = if side {
+        let free_y = (mh - ph as i32).max(0);
+        my + ((spec.offset_y * scale).round() as i32).clamp(0, free_y)
+    } else {
+        my
+    };
+    (x, y, pw, ph)
+}
+
+/// Visible part `(left, right)` of the collapsed bar window, in window pixels: the
+/// bar itself, centred. Everything outside it is cut off and takes no clicks.
+/// Rounded down, so the cut never reaches past the bar the web view draws.
+pub fn bar_region(scale: f64, bar_w: f64, window_w: u32) -> (i32, i32) {
+    let bw = ((bar_w * scale).floor() as i32).clamp(1, window_w as i32);
+    let left = (window_w as i32 - bw) / 2;
+    (left, left + bw)
+}
+
+/// Outline of the window region for the collapsed bar, in window pixels: the bar's
+/// slanted sides and chamfered lower corners (`barClipPath` in island.ts), pulled
+/// a little inside the drawn shape.
+///
+/// A window region turns off the transparency the rest of the window relies on:
+/// any pixel inside it that the web view leaves transparent — or only half covers,
+/// on an anti-aliased edge — shows up white. So the region must hold only pixels
+/// the bar paints solid black; losing a pixel or two of the edge is invisible.
+pub fn bar_outline(scale: f64, bar_w: f64, window_w: u32, h: i32) -> [(i32, i32); 6] {
+    let (l, r) = bar_region(scale, bar_w, window_w);
+    let inset = (2.0 * scale).round().max(2.0) as i32;
+    let slant = (5.0 * scale).round() as i32;
+    let corner = (2.5 * scale).round() as i32;
+    let at = |y: i32| inset + slant * y / h.max(1);
+    let low = h - corner;
+    [
+        (l + inset, 0),
+        (r - inset, 0),
+        (r - at(low), low),
+        (r - at(h) - corner, h),
+        (l + at(h) + corner, h),
+        (l + at(low), low),
+    ]
+}
+
+/// Clips the window to the bar outline (or lifts the clip).
+fn set_bar_clip(hwnd: HWND, outline: Option<[(i32, i32); 6]>) {
+    use windows::Win32::Graphics::Gdi::{CreatePolygonRgn, SetWindowRgn, WINDING};
+    unsafe {
+        // The system owns the region after SetWindowRgn, so it isn't freed here.
+        let rgn = outline.map(|pts| {
+            let pts = pts.map(|(x, y)| POINT { x, y });
+            CreatePolygonRgn(&pts, WINDING)
+        });
+        let _ = SetWindowRgn(hwnd, rgn, true);
+    }
+}
+
+/// Re-cuts the collapsed bar window to the current bar width. The window itself
+/// keeps its size, so this is all a width change needs.
+pub fn refresh_bar_clip(app: &AppHandle, bar_w: f64) {
+    let Some(win) = window(app) else { return };
+    let Some(hwnd) = hwnd_of(&win) else { return };
+    let Ok(size) = win.inner_size() else { return };
+    let scale = win.scale_factor().unwrap_or(1.0);
+    set_bar_clip(hwnd, Some(bar_outline(scale, bar_w, size.width, size.height as i32)));
+}
+
 /// Places and sizes the window. `collapsed` picks the wake strip instead of the panel.
 pub fn apply_geometry(app: &AppHandle, pref: &str, collapsed: bool) {
     let Some(win) = window(app) else { return };
@@ -240,64 +352,51 @@ pub fn apply_geometry(app: &AppHandle, pref: &str, collapsed: bool) {
     let mp = *m.position();
     let ms = *m.size();
 
-    let (dock, offset_y, bar) = app
+    let (dock, offset_y, bar, align, offset) = app
         .try_state::<crate::Shared>()
         .map(|s| {
             let s = s.settings.lock().unwrap();
             let bar = s.island_style == "bar" && s.island_dock == "top";
-            (s.island_dock.clone(), s.island_offset_y, bar)
+            (s.island_dock.clone(), s.island_offset_y, bar, s.island_align.clone(), s.island_offset_x)
         })
-        .unwrap_or_else(|| ("top".into(), 160.0, false));
-    let side = dock == "left" || dock == "right";
+        .unwrap_or_else(|| ("top".into(), 160.0, false, "center".into(), 0.0));
     let bar_w = app
         .try_state::<crate::Shared>()
         .map(|s| *s.gate.bar_w.lock().unwrap())
         .unwrap_or(BAR_WIN_W);
-    // The wake strip is horizontal on top, vertical on a side edge. In the thin-bar
-    // look the collapsed window is the visible bar itself.
-    let (lw, lh) = match (collapsed, side) {
-        (true, false) if bar => (bar_w, BAR_H),
-        (true, false) => (STRIP_W, STRIP_H),
-        (true, true) => (STRIP_H, STRIP_W),
-        (false, false) => (PANEL_W, PANEL_H),
-        (false, true) => (SIDE_PANEL_W, SIDE_PANEL_H),
-    };
-    let pw = (lw * scale).round().max(1.0) as u32;
-    let ph = (lh * scale).round().max(1.0) as u32;
-    let (align, offset) = app
-        .try_state::<crate::Shared>()
-        .map(|s| {
-            let s = s.settings.lock().unwrap();
-            (s.island_align.clone(), s.island_offset_x)
-        })
-        .unwrap_or_else(|| ("center".into(), 0.0));
-    // The bar must stay put when the window grows into the panel and back, so the
-    // narrow collapsed window is centred on where the panel would be.
-    let anchor_w = if bar && collapsed { (PANEL_W * scale).round() as i32 } else { pw as i32 };
-    let free = (ms.width as i32 - anchor_w).max(0);
-    let base = match align.as_str() {
-        "left" => 0,
-        "right" => free,
-        _ => free / 2,
-    };
-    // Keep the window on its monitor whatever the offset, or it becomes unreachable.
-    let rel = match dock.as_str() {
-        "left" => 0,
-        "right" => free,
-        _ => (base + (offset * scale).round() as i32).clamp(0, free),
-    };
-    let x = mp.x + rel + (anchor_w - pw as i32) / 2;
-    let y = if side {
-        let free_y = (ms.height as i32 - ph as i32).max(0);
-        mp.y + ((offset_y * scale).round() as i32).clamp(0, free_y)
-    } else {
-        mp.y
-    };
+    let (x, y, pw, ph) = window_rect(
+        (mp.x, mp.y, ms.width as i32, ms.height as i32),
+        scale,
+        &WindowSpec { dock: &dock, align: &align, offset_x: offset, offset_y, bar, collapsed },
+    );
 
-    let _ = win.set_size(PhysicalSize::new(pw, ph));
-    let _ = win.set_position(PhysicalPosition::new(x, y));
+    // Size and position in one call. Two separate ones show a frame in which the
+    // window has already shrunk but not yet moved, and the bar jumps.
+    match hwnd_of(&win) {
+        Some(hwnd) => unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                x,
+                y,
+                pw as i32,
+                ph as i32,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        },
+        None => {
+            let _ = win.set_size(PhysicalSize::new(pw, ph));
+            let _ = win.set_position(PhysicalPosition::new(x, y));
+        }
+    }
+    if let Some(hwnd) = hwnd_of(&win) {
+        let clip = (bar && collapsed).then(|| bar_outline(scale, bar_w, pw, ph as i32));
+        set_bar_clip(hwnd, clip);
+    }
     // Moving across displays can rescale the window: re-assert the physical size.
-    let _ = win.set_size(PhysicalSize::new(pw, ph));
+    if win.inner_size().map(|s| (s.width, s.height) != (pw, ph)).unwrap_or(false) {
+        let _ = win.set_size(PhysicalSize::new(pw, ph));
+    }
     let _ = win.set_always_on_top(true);
 }
 
@@ -438,8 +537,133 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
     });
 }
 
+/// True while a full-screen app (game, video, presentation) owns the display.
+fn fullscreen_app_running() -> bool {
+    use windows::Win32::UI::Shell::{
+        SHQueryUserNotificationState, QUNS_BUSY, QUNS_PRESENTATION_MODE,
+        QUNS_RUNNING_D3D_FULL_SCREEN,
+    };
+    match unsafe { SHQueryUserNotificationState() } {
+        Ok(s) => s == QUNS_BUSY || s == QUNS_RUNNING_D3D_FULL_SCREEN || s == QUNS_PRESENTATION_MODE,
+        Err(_) => false,
+    }
+}
+
+/// Tucks the island away while a full-screen app is up and brings it back when it
+/// ends. The front end slides the island off the edge (`fullscreen` event) and the
+/// window is hidden once that has played, so it can't sit on top of the game; on
+/// the way back the window is shown first, then the island slides in.
+pub fn spawn_fullscreen_watch(app: AppHandle) {
+    std::thread::spawn(move || {
+        let mut away = false;
+        loop {
+            std::thread::sleep(Duration::from_millis(800));
+            let full = fullscreen_app_running();
+            if full == away {
+                continue;
+            }
+            let Some(win) = window(&app) else { continue };
+            away = full;
+            if full {
+                let _ = win.emit("fullscreen", true);
+                std::thread::sleep(Duration::from_millis(450));
+                // Re-check: a quick alt-tab must not leave the island hidden.
+                if fullscreen_app_running() {
+                    let _ = win.hide();
+                } else {
+                    away = false;
+                    let _ = win.emit("fullscreen", false);
+                }
+            } else {
+                let _ = win.show();
+                let _ = win.set_always_on_top(true);
+                std::thread::sleep(Duration::from_millis(120));
+                let _ = win.emit("fullscreen", false);
+            }
+        }
+    });
+}
+
 pub fn set_ignore_cursor(app: &AppHandle, ignore: bool) {
     if let Some(win) = window(app) {
         let _ = win.set_ignore_cursor_events(ignore);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MON: (i32, i32, i32, i32) = (0, 0, 1920, 1080);
+
+    fn spec<'a>(collapsed: bool, _bar_w: f64, align: &'a str, offset_x: f64) -> WindowSpec<'a> {
+        WindowSpec { dock: "top", align, offset_x, offset_y: 0.0, bar: true, collapsed }
+    }
+
+    #[test]
+    fn window_never_moves_or_resizes_sideways_when_it_collapses() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            for align in ["center", "left", "right"] {
+                for offset in [0.0, 120.0, -300.0] {
+                    let panel = window_rect(MON, scale, &spec(false, 240.0, align, offset));
+                    for bar_w in [150.0, 200.0, 240.0, 333.0, 420.0] {
+                        let bar = window_rect(MON, scale, &spec(true, bar_w, align, offset));
+                        assert_eq!((bar.0, bar.2), (panel.0, panel.2), "scale {scale} {align} {offset} bar {bar_w}");
+                        assert_eq!(bar.1, panel.1, "bar must stay glued to the top edge");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bar_is_centred_in_its_window() {
+        for scale in [1.0, 1.25, 2.0] {
+            for bar_w in [150.0, 240.0, 333.0, 420.0] {
+                let pw = (PANEL_W * scale).round() as u32;
+                let (l, r) = bar_region(scale, bar_w, pw);
+                assert!((l - (pw as i32 - r)).abs() <= 1, "scale {scale} bar {bar_w}: {l}..{r} of {pw}");
+                assert_eq!(r - l, (bar_w * scale).floor() as i32);
+            }
+        }
+    }
+
+    #[test]
+    fn bar_region_never_exceeds_the_window() {
+        let (l, r) = bar_region(1.0, 5000.0, 720);
+        assert_eq!((l, r), (0, 720));
+    }
+
+    #[test]
+    fn bar_outline_stays_inside_the_drawn_bar() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let pw = (PANEL_W * scale).round() as u32;
+            let h = (BAR_H * scale).round() as i32;
+            for bar_w in [150.0, 240.0, 333.5, 420.0] {
+                // Left edge of the bar the web view draws: centred, in physical px.
+                let drawn_l = (pw as f64 - bar_w * scale) / 2.0;
+                let pts = bar_outline(scale, bar_w, pw, h);
+                for (x, y) in pts {
+                    let slant = 5.0 * scale * y as f64 / h as f64;
+                    let edge = drawn_l + slant;
+                    let mirrored = pw as f64 - x as f64;
+                    assert!(x as f64 >= edge + 1.0, "scale {scale} bar {bar_w}: {x},{y} vs {edge}");
+                    assert!(mirrored >= edge + 1.0, "scale {scale} bar {bar_w}: {x},{y} vs {edge}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn collapsed_bar_window_is_as_tall_as_the_bar() {
+        let r = window_rect(MON, 1.0, &spec(true, 240.0, "center", 0.0));
+        assert_eq!((r.2, r.3), (PANEL_W as u32, BAR_H as u32));
+    }
+
+    #[test]
+    fn bar_stays_on_its_own_monitor() {
+        let mon = (1920, 0, 2560, 1440);
+        let r = window_rect(mon, 1.0, &spec(true, 240.0, "center", 0.0));
+        assert!(r.0 >= 1920 && r.0 + r.2 as i32 <= 1920 + 2560);
     }
 }

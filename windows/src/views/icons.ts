@@ -38,6 +38,8 @@ export const ICONS = {
   stack: "M5 8h14v11.5H5V8zm1.8-3h10.4v1.6H6.8V5zm1.6-2.6h7.2V4H8.4V2.4z",
   // calendar
   calendar: "M7 2h2v2h6V2h2v2h2.2A1.8 1.8 0 0 1 21 5.8v13.4a1.8 1.8 0 0 1-1.8 1.8H4.8A1.8 1.8 0 0 1 3 19.2V5.8A1.8 1.8 0 0 1 4.8 4H7V2zM5 9.5V19h14V9.5H5zm2 2h3.2v3.2H7v-3.2z",
+  // checklist — Bitrix24 tasks
+  checklist: "M3.6 5.6 5 4.2l1.6 1.6L9.4 3l1.4 1.4-4.2 4.2-3-3zM12.5 5h8v2h-8V5zm-8.9 7.6L5 11.2l1.6 1.6 2.8-2.8 1.4 1.4-4.2 4.2-3-3zM12.5 12h8v2h-8v-2zM4.2 17.6h4v4h-4v-4zm8.3 1.4h8v2h-8v-2z",
   // arrow.clockwise (stroked)
   refresh: "M19 12a7 7 0 1 1-2.05-4.95M19 4.5V8h-3.5",
   // doc.text

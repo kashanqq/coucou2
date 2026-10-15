@@ -158,6 +158,10 @@ Compared with the [upstream repository](https://github.com/Louis-CFM/coucou):
 - A **Calendar** tab next to the chat shows the week, with **Join** buttons for Meet links; the island opens 5 minutes before a meeting.
 - Read-only OAuth with your own Google Cloud client (Desktop app), PKCE and a one-shot `127.0.0.1` redirect — no server in between. Client ID, secret and refresh token live in the Credential Manager (the refresh token is written by Rust only and never exposed to the front end); disconnecting revokes access at Google.
 
+**Bitrix24 deadlines** *(Windows)*
+- A **Bitrix24** tab shows your tasks as a calendar strip — Overdue, then one column per day (scroll sideways; a busy day scrolls on its own, the island never grows), then Later — with deadlines under 2 hours marked and links to open each task; the island opens once per task when it gets under 2 hours (on the thin bar: one status line).
+- Coucou never talks to Bitrix24: it reads a local `tasks.json` written by a script of your own — an array of `{"title", "url", "deadline"}` with an RFC 3339 deadline including its time zone, e.g. `2026-10-20T18:00:00+05:00` (`id` optional; tasks without a valid deadline are skipped). Set the path in Settings → Bitrix24; the file is re-read only when it changes.
+
 **Island placement and behaviour** *(Windows)*
 - Dock to the top, left or right edge (vertical column on the sides, with a distance from the top).
 - Alignment (center / left / right) plus a horizontal offset, gap from the top edge, compact width (150–288 px).
