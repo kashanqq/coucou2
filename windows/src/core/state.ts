@@ -2,6 +2,7 @@
 
 import type { BotEmoteName, BotStateName, IslandMode, IslandViewName } from "./layout";
 import type { EyeShape } from "../mochi/engine";
+import { BITRIX_COLOR, CALENDAR_COLOR } from "./brand";
 import type { BitrixTask, CalendarEvent } from "./bridge";
 
 export type AgentSource = "claudeCode" | "n8n";
@@ -67,11 +68,15 @@ export const INTEGRATION_AGENTS: AgentTask[] = [
   task("integration_notion", "Notion", "#8C8C8C", "n8n"),
   task("integration_calcom", "Cal.com", "#C9956A", "n8n"),
   task("integration_stripe", "Stripe", "#0570DE", "n8n"),
+  // Their pills open their own island views instead of taking the focus.
+  task("integration_calendar", "Calendar", CALENDAR_COLOR, "n8n"),
+  task("integration_bitrix", "Bitrix24", BITRIX_COLOR, "n8n"),
 ];
 
 export const TOGGLEABLE_INTEGRATION_IDS = [
   "integration_resend", "integration_n8n", "integration_vercel", "integration_github",
   "integration_notion", "integration_calcom", "integration_stripe",
+  "integration_calendar", "integration_bitrix",
 ];
 
 /** What an integration poller last reported. */

@@ -83,8 +83,6 @@ function stack(padLeft: number, padRight: number, ...children: Node[]): HTMLElem
 export function buildHeader(actions: ViewActions): ViewHost {
   const tabHome = h("button", { class: "tab", title: "Overview", onclick: () => go("overview") }, svg(ICONS.house, 13));
   const tabChat = h("button", { class: "tab", title: "Ask", onclick: () => go("prompt") }, svg(ICONS.bubble, 13));
-  const tabCal = h("button", { class: "tab", title: "Calendar", onclick: () => go("calendar") }, svg(ICONS.calendar, 13));
-  const tabBitrix = h("button", { class: "tab", title: "Bitrix24", onclick: () => go("bitrix") }, svg(ICONS.checklist, 13));
   const tabDrop = h("button", { class: "tab", title: "Drop", onclick: () => go("upload") }, svg(ICONS.plus, 13));
 
   const gearBtn = h("button", { title: "Settings", onclick: () => go("settings") }, svg(ICONS.gear, 14));
@@ -98,7 +96,7 @@ export function buildHeader(actions: ViewActions): ViewHost {
   const el = h(
     "div",
     { id: "header" },
-    h("div", { class: "tabs" }, tabHome, tabChat, tabCal, tabBitrix, tabDrop),
+    h("div", { class: "tabs" }, tabHome, tabChat, tabDrop),
     h("div", { class: "header-actions" }, gearBtn, soundBtn),
   );
 
@@ -106,12 +104,9 @@ export function buildHeader(actions: ViewActions): ViewHost {
     el,
     sync() {
       const v = State.view;
-      tabHome.classList.toggle("on", v === "overview" || v === "empty");
+      // Calendar and Bitrix24 open from the overview's pills, so they count as home.
+      tabHome.classList.toggle("on", v === "overview" || v === "empty" || v === "calendar" || v === "bitrix");
       tabChat.classList.toggle("on", v === "prompt");
-      tabCal.classList.toggle("on", v === "calendar");
-      tabBitrix.classList.toggle("on", v === "bitrix");
-      // Something overdue or due within two hours: the tab says so even when closed.
-      tabBitrix.classList.toggle("alert", needsAttention(State.bitrix.tasks, Date.now()));
       tabDrop.classList.toggle("on", v === "upload");
       gearBtn.classList.toggle("on", v === "settings");
       clear(gearBtn);
@@ -224,23 +219,33 @@ function buildOverview(actions: ViewActions): ViewHost {
       jump.style.display = detailOpen ? "none" : "";
 
       const others = State.otherTasks.slice(0, 4);
-      const pillKey = others.map((t) => `${t.id}:${t.pillBadge ?? ""}`).join("|");
+      // Something overdue or due within two hours: the Bitrix24 pill says so.
+      const bitrixAlert = needsAttention(State.bitrix.tasks, Date.now());
+      const pillKey = others.map((t) => `${t.id}:${t.pillBadge ?? ""}`).join("|") + `|bx:${bitrixAlert}`;
       if (pillKey !== pillIds) {
         pillIds = pillKey;
         clear(pills);
-        for (const t of others) pills.append(buildPill(t, actions));
+        for (const t of others) pills.append(buildPill(t, actions, t.id === "integration_bitrix" && bitrixAlert));
         pruneMiniBots();
       }
     },
   };
 }
 
-function buildPill(task: AgentTask, actions: ViewActions): HTMLElement {
+/** Integrations whose pill opens their own island view rather than the card. */
+const PILL_VIEWS: Partial<Record<string, IslandViewName>> = {
+  integration_calendar: "calendar",
+  integration_bitrix: "bitrix",
+};
+
+/** `alert`: Bitrix24 has something overdue or due within two hours. */
+function buildPill(task: AgentTask, actions: ViewActions, alert = false): HTMLElement {
   const label = task.id === "integration_claude" ? "VS Code" : task.name;
   const canvas = createMiniBot(task, 24);
+  const view = PILL_VIEWS[task.id];
   const pill = h(
     "div",
-    { class: "pill", onclick: () => actions.setFocus(task.id) },
+    { class: "pill", onclick: () => (view ? actions.setView(view) : actions.setFocus(task.id)) },
     canvas,
     h("span", { class: "lbl", text: label }),
   );
@@ -258,7 +263,12 @@ function buildPill(task: AgentTask, actions: ViewActions): HTMLElement {
     (pill.querySelector(".lbl") as HTMLElement).style.color = "";
   });
 
-  if (task.pillBadge) {
+  if (alert) {
+    const inner = h("i", { style: "background:#F4505E" }, svg(ICONS.bang, 6));
+    const badge = h("div", { class: "pill-badge" }, inner);
+    badge.style.boxShadow = "0 0 4px #F4505E99";
+    pill.append(badge);
+  } else if (task.pillBadge) {
     const colors = { approval: "#F5A524", finished: "#22C55E", error: "#F4505E" } as const;
     const icons = { approval: ICONS.bang, finished: ICONS.check, error: ICONS.xmark } as const;
     const inner = h("i", { style: `background:${colors[task.pillBadge]}` }, svg(icons[task.pillBadge], 6, { stroke: task.pillBadge === "finished" ? 3 : 0 }));

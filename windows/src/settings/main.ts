@@ -8,6 +8,7 @@ import {
   type HookStatus,
 } from "../core/bridge";
 import { DEFAULT_SETTINGS, type Settings } from "../core/state";
+import { BITRIX_COLOR, CALENDAR_COLOR } from "../core/brand";
 import { h, clear } from "../views/dom";
 
 let settings: Settings = { ...DEFAULT_SETTINGS };
@@ -355,7 +356,15 @@ const INTEGRATIONS: IntegrationDef[] = [
 
 const MAX_ACTIVE = 4;
 
-function integrationsSection(present: Record<string, boolean>): HTMLElement {
+/**
+ * `extra`: Google Calendar and Bitrix24, which live inside this section with
+ * their own settings; their pill gets the same switch as the others, in front of
+ * the subsection's heading.
+ */
+function integrationsSection(
+  present: Record<string, boolean>,
+  ...extra: { id: string; el: HTMLElement }[]
+): HTMLElement {
   const note = h("div", { class: "hint" });
   const list = h("div", { style: "display:flex;flex-direction:column;gap:14px" });
 
@@ -364,21 +373,34 @@ function integrationsSection(present: Record<string, boolean>): HTMLElement {
     note.textContent = `Pick up to ${MAX_ACTIVE} pills to show next to Mochi — ${used}/${MAX_ACTIVE} in use. Keys are stored in the Windows Credential Manager, never on disk.`;
   }
 
-  for (const def of INTEGRATIONS) {
-    const active = settings.activeIntegrations.includes(def.id);
-    const sw = h("button", { class: active ? "switch on" : "switch" });
+  function pillSwitch(id: string): HTMLElement {
+    const sw = h("button", { class: settings.activeIntegrations.includes(id) ? "switch on" : "switch" });
     sw.addEventListener("click", () => {
-      const on = settings.activeIntegrations.includes(def.id);
+      const on = settings.activeIntegrations.includes(id);
       if (on) {
-        settings.activeIntegrations = settings.activeIntegrations.filter((x) => x !== def.id);
+        settings.activeIntegrations = settings.activeIntegrations.filter((x) => x !== id);
       } else {
         if (settings.activeIntegrations.length >= MAX_ACTIVE) return;
-        settings.activeIntegrations = [...settings.activeIntegrations, def.id];
+        settings.activeIntegrations = [...settings.activeIntegrations, id];
       }
       sw.classList.toggle("on", !on);
       updateNote();
       void save();
     });
+    return sw;
+  }
+
+  // Beside the heading, not in it: the heading is redrawn whenever the status changes.
+  for (const sub of extra) {
+    const head = sub.el.querySelector("h3");
+    if (!head) continue;
+    const row = h("div", { class: "sub-head" });
+    head.replaceWith(row);
+    row.append(pillSwitch(sub.id), head);
+  }
+
+  for (const def of INTEGRATIONS) {
+    const sw = pillSwitch(def.id);
 
     const rows = h("div", { style: "display:flex;flex-direction:column;gap:6px;flex:1 1 auto;min-width:0" });
     for (const field of def.fields) {
@@ -424,14 +446,14 @@ function integrationsSection(present: Record<string, boolean>): HTMLElement {
   }
 
   updateNote();
-  return h("section", {}, h("h2", {}, h("span", { text: "Integrations" })), note, list);
+  return h("section", {}, h("h2", {}, h("span", { text: "Integrations" })), note, list, ...extra.map((x) => x.el));
 }
 
 // ── Google Calendar section ───────────────────────────────────────────────────
 
 function calendarSection(initial: CalendarStatus, secretStored: boolean): HTMLElement {
   const status = { ...initial };
-  const head = h("h2", {});
+  const head = h("h3", {});
   const body = h("div", { style: "display:flex;flex-direction:column;gap:10px" });
   const feedback = h("div", {});
 
@@ -485,7 +507,11 @@ function calendarSection(initial: CalendarStatus, secretStored: boolean): HTMLEl
   async function refresh() {
     Object.assign(status, (await Bridge.calendarStatus()) ?? {});
     clear(head);
-    head.append(statusDot(status.connected), h("span", { text: "Google Calendar" }));
+    head.append(
+      statusDot(status.connected),
+      h("i", { class: "dot", style: `background:${CALENDAR_COLOR}` }),
+      h("span", { text: "Google Calendar" }),
+    );
     connectBtn.disabled = !status.clientReady || status.signingIn;
     connectBtn.className = status.connected ? "danger" : "primary";
     connectBtn.textContent = status.connected
@@ -517,7 +543,7 @@ function calendarSection(initial: CalendarStatus, secretStored: boolean): HTMLEl
   // Rust reports every sync and sign-out; keep the dot honest.
   void onEvent<CalendarUpdate>("calendar", () => void refresh());
   void refresh();
-  return h("section", {}, head, body);
+  return h("div", { class: "subsection" }, head, body);
 }
 
 // ── Bitrix24 section ──────────────────────────────────────────────────────────
@@ -533,7 +559,7 @@ const SYNC_TEXT: Record<BitrixSyncStatus["state"], string> = {
 };
 
 function bitrixSection(): HTMLElement {
-  const head = h("h2", {});
+  const head = h("h3", {});
   const feedback = h("div", {});
   const textInput = (value: string, placeholder: string) => h("input", {
     type: "text", value, placeholder, spellcheck: "false", style: "flex:1 1 auto;min-width:0",
@@ -577,7 +603,11 @@ function bitrixSection(): HTMLElement {
   function show(update: BitrixUpdate | null) {
     const ok = !!update?.configured && !update.error;
     clear(head);
-    head.append(statusDot(ok), h("span", { text: "Bitrix24" }));
+    head.append(
+      statusDot(ok),
+      h("i", { class: "dot", style: `background:${BITRIX_COLOR}` }),
+      h("span", { text: "Bitrix24" }),
+    );
     clear(feedback);
     if (!update?.configured) return;
     if (update.error) {
@@ -594,7 +624,7 @@ function bitrixSection(): HTMLElement {
   void onEvent<BitrixUpdate>("bitrix", show);
   void Bridge.bitrixRefresh();
 
-  return h("section", {}, head, h("div", { style: "display:flex;flex-direction:column;gap:10px" },
+  return h("div", { class: "subsection" }, head, h("div", { style: "display:flex;flex-direction:column;gap:10px" },
     h("div", {
       class: "hint",
       text: "The island shows what is overdue and what is due within two hours, and opens once when a task gets that close. "
@@ -811,9 +841,14 @@ async function main() {
     h("h1", {}, h("span", { text: "Coucou" }), h("span", { class: "version", text: version })),
     claudeSection(status),
     apiSection(hasKey),
-    integrationsSection(present),
-    calendarSection(calendarStatus, (await Bridge.secretPresent("gcal-client-secret")) ?? false),
-    bitrixSection(),
+    integrationsSection(
+      present,
+      {
+        id: "integration_calendar",
+        el: calendarSection(calendarStatus, (await Bridge.secretPresent("gcal-client-secret")) ?? false),
+      },
+      { id: "integration_bitrix", el: bitrixSection() },
+    ),
     generalSection(),
     h("div", {
       class: "hint",

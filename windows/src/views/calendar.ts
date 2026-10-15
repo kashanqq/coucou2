@@ -5,6 +5,7 @@ import { h, svg, clear, dot } from "./dom";
 import { ICONS } from "./icons";
 import { Bridge, type CalendarEvent } from "../core/bridge";
 import { State } from "../core/state";
+import { CALENDAR_COLOR } from "../core/brand";
 import type { ViewActions, ViewHost } from "./views";
 
 const DAY_MS = 86_400_000;
@@ -118,7 +119,7 @@ export function buildCalendar(actions: ViewActions): ViewHost {
     onclick: () => actions.openUrl("https://calendar.google.com"),
   }, svg(ICONS.arrowUpRight, 9));
   const head = h("div", { class: "cal-head" },
-    dot("#4285F4", 7),
+    dot(CALENDAR_COLOR, 7),
     h("span", { class: "cal-name", text: "Google Calendar" }),
     status,
     h("div", { class: "grow" }),

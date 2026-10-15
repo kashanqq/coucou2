@@ -14,13 +14,16 @@ use tauri::{AppHandle, Emitter, Manager, Monitor, PhysicalPosition, PhysicalSize
 
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::core::BOOL;
-use windows::Win32::Foundation::LPARAM;
+use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::System::Ole::RevokeDragDrop;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GetClassNameW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, SWP_NOACTIVATE,
-    SWP_NOZORDER, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    GetCursorPos, GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, GWL_STYLE,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_CAPTION,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX,
+    WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
 };
 
 /// Logical size of the full window — the largest island view, like the macOS panel.
@@ -133,7 +136,7 @@ impl PollGate {
         }
         if self.ignoring.load(Ordering::Relaxed) == accept {
             self.ignoring.store(!accept, Ordering::Relaxed);
-            let _ = win.set_ignore_cursor_events(!accept);
+            set_click_through(win, !accept);
         }
         drop(guard);
     }
@@ -412,12 +415,97 @@ fn hwnd_of(win: &WebviewWindow) -> Option<HWND> {
 
 /// WS_EX_NOACTIVATE keeps clicks from stealing focus; WS_EX_TOOLWINDOW keeps the
 /// island out of Alt-Tab.
+///
+/// The window also becomes a plain popup. Tao makes every window an overlapped
+/// one with a caption and only hides the frame by collapsing it, and an
+/// overlapped window always has a title bar in Win32, WS_CAPTION or not: whenever
+/// Windows repaints the frame — a style change, a window region — it draws that
+/// bar over the screen, a light strip titled "Coucou". A popup has none.
 pub fn make_non_activating(win: &WebviewWindow) {
     let Some(hwnd) = hwnd_of(win) else { return };
+    let frame = WS_CAPTION.0 | WS_SYSMENU.0 | WS_THICKFRAME.0 | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0;
     unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        SetWindowLongPtrW(hwnd, GWL_STYLE, (style & !(frame as isize)) | WS_POPUP.0 as isize);
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         let want = ex | WS_EX_NOACTIVATE.0 as isize | WS_EX_TOOLWINDOW.0 as isize;
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, want);
+        let _ = SetWindowSubclass(hwnd, Some(no_frame_paint), 1, 0);
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+    clear_surface(hwnd);
+}
+
+/// Wipes the window's own surface to transparent. The web view draws on top of
+/// it, and wherever the page is transparent this surface shows through — so the
+/// title bar tao paints when it creates the window stayed there for good, a light
+/// "Coucou" strip above the island. GDI black has zero alpha, which this
+/// transparent (blur-behind) window shows as see-through.
+fn clear_surface(hwnd: HWND) {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Gdi::{FillRect, GetStockObject, GetWindowDC, ReleaseDC, BLACK_BRUSH, HBRUSH};
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+    unsafe {
+        let mut r = RECT::default();
+        if GetWindowRect(hwnd, &mut r).is_err() {
+            return;
+        }
+        let rc = RECT { left: 0, top: 0, right: r.right - r.left, bottom: r.bottom - r.top };
+        let hdc = GetWindowDC(Some(hwnd));
+        if hdc.is_invalid() {
+            return;
+        }
+        FillRect(hdc, &rc, HBRUSH(GetStockObject(BLACK_BRUSH).0));
+        ReleaseDC(Some(hwnd), hdc);
+    }
+}
+
+/// Keeps Windows from ever painting a frame or caption on the island again, and
+/// clears whatever needs repainting to transparent instead of leaving it as is.
+unsafe extern "system" fn no_frame_paint(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    _data: usize,
+) -> LRESULT {
+    use windows::Win32::UI::WindowsAndMessaging::{WM_ERASEBKGND, WM_NCACTIVATE, WM_NCPAINT};
+    match msg {
+        WM_NCPAINT => LRESULT(0),
+        // TRUE lets the activation change go through without drawing the frame.
+        WM_NCACTIVATE => LRESULT(1),
+        WM_ERASEBKGND => {
+            clear_surface(hwnd);
+            LRESULT(1)
+        }
+        _ => unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) },
+    }
+}
+
+/// Click-through on or off: the two extended-style bits and nothing else.
+///
+/// Not `set_ignore_cursor_events`: tao rewrites the whole window style for it —
+/// caption included, and dropping NOACTIVATE / TOOLWINDOW — then forces a frame
+/// recalculation (SWP_FRAMECHANGED). The click-through flips every time the
+/// cursor reaches or leaves the island, and each flip could flash a title bar.
+fn set_click_through(win: &WebviewWindow, on: bool) {
+    let Some(hwnd) = hwnd_of(win) else { return };
+    let bits = (WS_EX_TRANSPARENT.0 | WS_EX_LAYERED.0) as isize;
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let want = if on { ex | bits } else { ex & !bits };
+        if want != ex {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, want);
+        }
     }
 }
 
@@ -578,6 +666,8 @@ pub fn spawn_fullscreen_watch(app: AppHandle) {
                 }
             } else {
                 let _ = win.show();
+                // Showing goes through tao, which puts back the styles it likes.
+                make_non_activating(&win);
                 let _ = win.set_always_on_top(true);
                 std::thread::sleep(Duration::from_millis(120));
                 let _ = win.emit("fullscreen", false);
@@ -588,7 +678,7 @@ pub fn spawn_fullscreen_watch(app: AppHandle) {
 
 pub fn set_ignore_cursor(app: &AppHandle, ignore: bool) {
     if let Some(win) = window(app) {
-        let _ = win.set_ignore_cursor_events(ignore);
+        set_click_through(&win, ignore);
     }
 }
 

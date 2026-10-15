@@ -8,8 +8,9 @@ import { State } from "../core/state";
 import { announceKey, deadlineMs, dueForAnnouncement, dueLabel, nextAnnouncementAt } from "../core/deadlines";
 import type { Island } from "./island";
 
-/** Bitrix24's brand cyan, for the bar note and the tab. */
-export const BITRIX_COLOR = "#2FC6F6";
+import { BITRIX_COLOR } from "../core/brand";
+
+export { BITRIX_COLOR };
 
 /** setTimeout overflows past ~24.8 days and fires at once; wake up and re-plan instead. */
 const MAX_WAIT_MS = 6 * 60 * 60_000;
