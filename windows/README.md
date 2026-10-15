@@ -46,7 +46,8 @@ installs for the current user only — no admin prompt.
 | Drag a file onto the island | Mochi turns into a box, swallows it, then offers to answer questions about it |
 | `Esc` | Closes the island |
 | Calendar tab (next to the chat) | Your week from Google Calendar, Join buttons for Meet links; the island opens 5 minutes before a meeting. Connect it in Settings → Google Calendar |
-| Settings → Look → *Thin bar* | A 15 px black bar stays on the top edge. Hover: it peeks. Click: it opens. Move the cursor away: it folds back into the bar. While folded, nothing opens it on its own — Claude Code, integrations and calendar reminders just write one line on the bar ("Needs permission · …", "Vercel · my-app", "In 5 min · Standup"…) |
+| Settings → General → Look → *Thin bar* | A 15 px black bar stays on the top edge. Hover: it peeks. Click: it opens. Move the cursor away: it folds back into the bar. While folded, nothing opens it on its own — Claude Code, integrations and calendar reminders just write one line on the bar ("Needs permission · …", "Vercel · my-app", "In 5 min · Standup"…) |
+| Settings → General → *Dock to*, *Island position*, *Compact width*, *Wake delay*, *Expand on hover* | Dock the island to the top, left or right edge, align and offset it, set how fast it peeks, or open it on hover and close it when the cursor leaves |
 | Tray icon | Open, Settings…, Pause, Quit |
 
 Everything else happens on its own: a Claude Code permission request opens the
@@ -72,9 +73,18 @@ It works from any terminal — Windows Terminal, PowerShell, VS Code, Git Bash.
 
 ## Chat and keys
 
-**Settings… → Claude** takes your Anthropic API key. Keys live in the **Windows
-Credential Manager**, never on disk and never in the interface — the island can
-only ask whether a key exists. Same for every integration key.
+**Settings… → Chat** picks the chat provider:
+
+- **Anthropic API**: your Anthropic API key.
+- **OpenAI-compatible**: any base URL + model (DeepSeek by default; OpenRouter,
+  Groq, Ollama…). The key may stay empty for Ollama. The model field accepts a
+  fallback chain (`model-a, model-b`): the next model answers when one hits a
+  quota (429), overload (503) or credit (402) error.
+- **Claude subscription**: the `claude` CLI already logged in on this machine.
+
+Keys live in the **Windows Credential Manager**, never on disk and never in the
+interface — the island can only ask whether a key exists. Same for every
+integration key and the Google Calendar credentials.
 
 No telemetry. The only network requests Coucou makes are to the services you
 configure yourself.
@@ -97,12 +107,13 @@ to work on the island's looks. It also serves `dev/upload-preview.html`, which
 replays the whole file-drop choreography on a loop — the one part of the UI that
 otherwise needs a real drag from Explorer to see. Neither page ships in the app.
 
-`npm run pack` leaves two files in `windows/release/`, the same names the release
-workflow publishes:
+`npm run pack` leaves these in `windows/release/` (the two installers use the
+same names the release workflow publishes):
 
 ```
 Coucou-Windows-X.Y.Z-setup.exe    the versioned installer
 Coucou-Windows-setup.exe          the same file under the rolling name
+Coucou-portable/                  coucou.exe + coucou-hook.exe, no installer
 ```
 
 Installing is optional — `target/release/coucou.exe` runs on its own. There is no
@@ -124,13 +135,17 @@ npm run icons          # regenerates src-tauri/icons from scripts/gen-icons.mjs
 ```
 windows/
   src/                 island front end (TypeScript, no framework)
+    core/              shared state, layout, animation, sound, Tauri bridge
     mochi/             Mochi and the launch greeting, in Canvas 2D
-    island/            state machine, hooks, integrations
-    views/             every island view
+    island/            state machine, hooks, integrations, calendar
+    views/             every island view (chat, calendar, integrations, upload…)
+    upload/            the file-drop choreography
     settings/          the settings window
-  src-tauri/           Rust backend: window, named pipe, Claude API, pollers
+  src-tauri/           Rust backend: window, named pipe, chat providers, pollers,
+                       Google Calendar, Credential Manager, hooks install
   hook/                coucou-hook.exe, the Claude Code relay
-  scripts/             icon generator
+  scripts/             icon generator, installer packaging
+  dev/                 browser-only previews, never shipped
 ```
 
 ### Log
