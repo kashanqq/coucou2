@@ -109,6 +109,8 @@ export const Bridge = {
   /** Syncs now; the result arrives as a `calendar` event. */
   calendarRefresh: () => call<void>("calendar_refresh"),
   calendarStatus: () => call<CalendarStatus>("calendar_status"),
+  /** The last week synced (kept on disk, so it's there offline); no network. */
+  calendarSnapshot: () => call<CalendarUpdate>("calendar_snapshot"),
 
   // ── Bitrix24 ──────────────────────────────────────────────────────────────
   /** Re-reads tasks.json; the result arrives as a `bitrix` event. */

@@ -9,19 +9,29 @@
 // opened only from the Sign in button.
 //
 // Rare and polite, as the plan asks: every 45 min ± 10, never two at once,
-// nothing while paused or without a portal.
+// nothing while paused or without a portal. Cheap on the machine too: no Edge
+// at all while offline or while the session needs a sign-in, and the whole
+// process tree (Python, Playwright's driver, Edge) lives in a job object, so a
+// timeout or Coucou quitting can't leave any of it behind.
 
 use std::io::Read;
+use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+};
+use windows::Win32::System::Threading::WaitForSingleObject;
 
 use crate::log;
 
@@ -31,6 +41,11 @@ const SYNC_TIMEOUT: Duration = Duration::from_secs(3 * 60);
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(11 * 60);
 const BASE_DELAY_S: u64 = 45 * 60;
 const JITTER_S: u64 = 10 * 60;
+/// How often the schedule looks at the clock, so a wake or a returning network
+/// is noticed within a minute. While a run is due but the portal is
+/// unreachable, each tick is one HEAD request, never an Edge.
+const TICK: Duration = Duration::from_secs(60);
+const OFFLINE: &str = "Offline — syncs as soon as the portal is reachable.";
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -124,16 +139,85 @@ pub fn last_status(app: &AppHandle) -> SyncStatus {
 }
 
 /// Background schedule. The first run comes shortly after launch.
+///
+/// The next run is a wall-clock time kept on disk (bitrix-sync.json), not a
+/// countdown: sleep, a shutdown or time offline all count towards it, and the
+/// first tick after any of them runs the sync if it's due. A tick is a look at
+/// the clock; only a due tick costs anything (a HEAD request, then Edge).
 pub fn start(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_secs(20)).await;
+        let mut ticker = tokio::time::interval(TICK);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            if !crate::integrations::PAUSED.load(Ordering::Relaxed) && !portal(&app).is_empty() {
-                run(&app, false).await;
-            }
-            tokio::time::sleep(next_delay(now_ms())).await;
+            ticker.tick().await;
+            scheduled_run(&app).await;
         }
     });
+}
+
+/// One tick of the schedule: runs the sync if it's due and possible.
+async fn scheduled_run(app: &AppHandle) {
+    if crate::integrations::PAUSED.load(Ordering::Relaxed) || !is_due(now_ms(), load_next_at()) {
+        return;
+    }
+    let portal = portal(app);
+    if portal.is_empty() {
+        return;
+    }
+    // A headless run can't sign in, it would only find that out again. The
+    // Sign in button runs a sync itself once the user is through.
+    if LAST.lock().unwrap().as_ref().is_some_and(|s| s.state == "needs-login") {
+        return;
+    }
+    if !reachable(&portal).await {
+        // Still due: the next tick tries again, so the sync follows the network back.
+        let said = LAST.lock().unwrap().as_ref().and_then(|s| s.message.clone());
+        if service_dir().is_some() && said.as_deref() != Some(OFFLINE) {
+            publish(app, SyncStatus::new("error", Some(OFFLINE.into())));
+        }
+        return;
+    }
+    let status = run(app, false).await;
+    // The network went away mid-run: keep it due rather than wait 45 minutes.
+    if status.state == "error" && !reachable(&portal).await {
+        save_next_at(now_ms());
+    }
+}
+
+/// Due when the planned time has come, when there is none yet, or when it lies
+/// further ahead than any delay could (the clock was set back).
+fn is_due(now: u64, next_at: Option<u64>) -> bool {
+    let longest = (BASE_DELAY_S + JITTER_S) * 1000;
+    next_at.is_none_or(|at| at <= now || at > now + longest)
+}
+
+fn schedule_path() -> PathBuf {
+    crate::settings::local_dir().join("bitrix-sync.json")
+}
+
+fn load_next_at() -> Option<u64> {
+    let text = std::fs::read_to_string(schedule_path()).ok()?;
+    serde_json::from_str::<Value>(&text).ok()?.get("nextAt")?.as_u64()
+}
+
+fn save_next_at(at: u64) {
+    let _ = std::fs::create_dir_all(crate::settings::local_dir());
+    let _ = std::fs::write(schedule_path(), serde_json::json!({ "nextAt": at }).to_string());
+}
+
+/// False only when the portal can't be reached at all (no network, no DNS).
+/// Any HTTP answer, even an error page, means Edge would get through.
+async fn reachable(portal: &str) -> bool {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_default();
+    match client.head(portal).send().await {
+        Ok(_) => true,
+        Err(e) => !(e.is_connect() || e.is_timeout()),
+    }
 }
 
 /// One run of `sync` (or `login`, which opens a visible Edge window). Returns
@@ -179,6 +263,11 @@ pub async fn run(app: &AppHandle, login: bool) -> SyncStatus {
         status.message.as_deref().map(|m| format!(" — {m}")).unwrap_or_default()
     ));
     publish(app, status.clone());
+    if !login {
+        // Any finished sync, scheduled or "Sync now", sets the next one.
+        let now = now_ms();
+        save_next_at(now + next_delay(now).as_millis() as u64);
+    }
     if status.state == "ok" {
         // The file just changed; show it now rather than at the next 30 s check.
         crate::bitrix::check(app, false);
@@ -186,7 +275,35 @@ pub async fn run(app: &AppHandle, login: bool) -> SyncStatus {
     status
 }
 
-/// Runs the service and waits, killing it past `timeout`. (stdout, exit code)
+/// Kills every process still in it when dropped: whatever the service started
+/// and left running (Playwright's driver, Edge) goes with it.
+struct Job(HANDLE);
+
+impl Job {
+    fn new() -> Option<Self> {
+        let job = Job(unsafe { CreateJobObjectW(None, None) }.ok()?);
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        unsafe {
+            SetInformationJobObject(
+                job.0,
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        }
+        .ok()?;
+        Some(job)
+    }
+}
+
+impl Drop for Job {
+    fn drop(&mut self) {
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+/// Runs the service and waits, killing its whole tree past `timeout`. (stdout, exit code)
 fn run_service(dir: &PathBuf, args: &[String], timeout: Duration) -> Result<(String, Option<i32>), String> {
     let python = dir.join(".venv").join("Scripts").join("python.exe");
     let mut child = Command::new(python)
@@ -199,6 +316,12 @@ fn run_service(dir: &PathBuf, args: &[String], timeout: Duration) -> Result<(Str
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| format!("Could not start the sync service: {e}"))?;
+    let process = HANDLE(child.as_raw_handle());
+    // Python takes far longer to start than this, so its children are born inside.
+    let job = Job::new().filter(|job| unsafe { AssignProcessToJobObject(job.0, process) }.is_ok());
+    if job.is_none() {
+        log::line("bitrix sync: no job object, a timeout may leave Edge running".to_string());
+    }
 
     // Drain both pipes on their own threads so a chatty child can't block.
     let mut stdout = child.stdout.take().unwrap();
@@ -214,19 +337,23 @@ fn run_service(dir: &PathBuf, args: &[String], timeout: Duration) -> Result<(Str
         s
     });
 
-    let started = Instant::now();
-    let code = loop {
-        match child.try_wait() {
-            Ok(Some(exit)) => break exit.code(),
-            Ok(None) if started.elapsed() > timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(250)),
-            Err(e) => return Err(e.to_string()),
+    // Sleeps in the kernel until the process ends or time is up: no polling.
+    let ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX - 1);
+    let code = match unsafe { WaitForSingleObject(process, ms) } {
+        WAIT_OBJECT_0 => child.wait().map_err(|e| e.to_string())?.code(),
+        WAIT_TIMEOUT => {
+            let _ = child.kill();
+            let _ = child.wait();
+            None
+        }
+        _ => {
+            let _ = child.kill();
+            child.wait().map_err(|e| e.to_string())?.code()
         }
     };
+    // Whatever this run left running ends here, and with it any copy of the
+    // pipes it held, so the readers below can finish.
+    drop(job);
     let stdout = out.join().unwrap_or_default();
     let stderr = err.join().unwrap_or_default();
     if code != Some(0) && !stderr.trim().is_empty() {
@@ -276,6 +403,23 @@ mod tests {
         // A crash after printing "ok" must not look like success.
         let s = parse_status("{\"status\": \"ok\", \"count\": 1}", Some(1));
         assert_eq!(s.state, "error");
+    }
+
+    #[test]
+    fn due_by_the_wall_clock() {
+        let now = 10_000_000_000;
+        assert!(is_due(now, None), "never ran");
+        assert!(!is_due(now, Some(now + 60_000)));
+        assert!(is_due(now, Some(now)));
+        // Planned for 25 min after the laptop went to sleep for an hour.
+        assert!(is_due(now, Some(now - 35 * 60_000)));
+    }
+
+    #[test]
+    fn a_clock_set_back_counts_as_due() {
+        let now = 10_000_000_000;
+        assert!(!is_due(now, Some(now + 55 * 60_000)));
+        assert!(is_due(now, Some(now + 3 * 3600_000)));
     }
 
     #[test]

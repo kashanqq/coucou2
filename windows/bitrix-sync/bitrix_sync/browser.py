@@ -57,6 +57,10 @@ def _launch(p, profile, headless):
         headless=headless,
         no_viewport=not headless,
         viewport={"width": 1440, "height": 900} if headless else None,
+        # Nobody looks at the headless page, so it skips images. (Not page.route:
+        # intercepting requests turns off the HTTP cache, and the portal's
+        # scripts would then be downloaded again on every run.)
+        args=["--blink-settings=imagesEnabled=false"] if headless else [],
     )
     ctx.set_default_timeout(PAGE_TIMEOUT_MS)
     return ctx

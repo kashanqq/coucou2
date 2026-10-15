@@ -165,3 +165,12 @@ problems. It stays on your machine.
   attach it as context, and jumping to a specific terminal window — "Open
   terminal" opens the working folder in VS Code when `code` is on your `PATH`.
 - Cal.com shows the next bookings as a list rather than the Mac's calendar.
+- Google Calendar isn't downloaded every 2 minutes. Every 5 minutes Coucou asks
+  Google whether anything changed (a sync token per calendar, so the answer is
+  empty when nothing did) and downloads the week only when something did, every
+  6 hours as the window moves on, or on ↻. The 5 minutes run on the wall clock
+  from the last answer, so time asleep, switched off or offline counts: the
+  first minute after waking up or getting the network back, it checks. Google's push notifications would need
+  a public HTTPS server, which a desktop app doesn't have. The last week
+  downloaded is kept in `%LOCALAPPDATA%\Coucou\calendar.json` (deleted on
+  disconnect), so the tab still shows it offline and right at launch.

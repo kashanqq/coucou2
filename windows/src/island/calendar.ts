@@ -15,7 +15,8 @@ let reminder: number | null = null;
 const announced = new Set<string>();
 
 export function registerCalendarHandlers(island: Island) {
-  void onEvent<CalendarUpdate>("calendar", (update) => {
+  let heard = false;
+  const apply = (update: CalendarUpdate) => {
     State.calendar = {
       connected: update.connected,
       events: update.events ?? State.calendar.events,
@@ -25,11 +26,15 @@ export function registerCalendarHandlers(island: Island) {
     if (!update.connected) State.calendar.events = [];
     scheduleReminder(island);
     State.notify();
+  };
+  void onEvent<CalendarUpdate>("calendar", (update) => {
+    heard = true;
+    apply(update);
   });
-  void Bridge.calendarStatus().then((status) => {
-    if (!status) return;
-    State.calendar.connected = status.connected;
-    State.notify();
+  // The week from the last sync (calendar.json), before the network answers —
+  // unless a fresher update already arrived.
+  void Bridge.calendarSnapshot().then((update) => {
+    if (update && !heard) apply(update);
   });
 }
 

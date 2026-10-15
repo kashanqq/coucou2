@@ -24,6 +24,18 @@ pages use, with your session: tasks where you are responsible, not completed,
 with a deadline. Read-only, your tasks only, about every 45 minutes (± 10), never
 two at once, nothing while Coucou is paused.
 
+Light on the PC: the headless Edge doesn't load images, and every run ends with
+no process left over. Coucou puts the service in a Windows job object, so
+Python, Playwright's driver and Edge all go when it finishes, times out (3 min)
+or Coucou quits. No Edge starts while the portal is unreachable (Coucou checks
+with a single HEAD request, once a minute while a sync is due) or while the
+session needs a sign-in.
+
+The next run is a time on the wall clock, kept in
+`%LOCALAPPDATA%\Coucou\bitrix-sync.json`, not a countdown. Sleep, a shutdown
+or time offline count towards it, so a sync that came due meanwhile runs within
+a minute of waking up or of the network coming back.
+
 ## Setup
 
 ```powershell
