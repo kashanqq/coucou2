@@ -6,6 +6,7 @@ import {
   ATTENTION_MS,
   announceKey,
   dueForAnnouncement,
+  dayColumns,
   dueLabel,
   groupTasks,
   needsAttention,
@@ -107,4 +108,58 @@ test("nextAnnouncementAt: now when a task is already in the window", () => {
 test("nextAnnouncementAt: null when nothing is left to announce", () => {
   const t = task("a", 30 * MIN);
   assert.equal(nextAnnouncementAt([t, task("late", -MIN)], NOW, new Set([announceKey(t)])), null);
+});
+
+// ── Calendar columns (local days) ──────────────────────────────────────────────
+
+const local = (d: number, h = 12, min = 0) => new Date(2026, 9, d, h, min).getTime();
+const at = (id: string, ms: number): DeadlineTask =>
+  ({ id, title: id, url: null, deadline: new Date(ms).toISOString() });
+const NOON_15 = local(15);
+
+test("dayColumns: overdue first, then a week of days from today", () => {
+  const cols = dayColumns([at("late", local(14)), at("today", local(15, 18)), at("fri", local(16, 9))], NOON_15);
+  assert.deepEqual(cols.map((c) => c.kind), ["overdue", "day", "day", "day", "day", "day", "day", "day"]);
+  assert.equal(cols[1].day, local(15, 0));
+  assert.equal(cols[2].day, local(16, 0));
+  assert.deepEqual(cols.map((c) => c.tasks.map((t) => t.id)), [["late"], ["today"], ["fri"], [], [], [], [], []]);
+});
+
+test("dayColumns: no overdue column when nothing is late", () => {
+  const cols = dayColumns([at("a", local(15, 18))], NOON_15);
+  assert.equal(cols[0].kind, "day");
+  assert.equal(cols.length, 7);
+});
+
+test("dayColumns: runs on to the last deadline, empty days included", () => {
+  const cols = dayColumns([at("far", local(25, 10))], NOON_15);
+  assert.equal(cols.length, 11); // the 15th … the 25th
+  assert.deepEqual(cols[10].tasks.map((t) => t.id), ["far"]);
+  assert.ok(cols.slice(0, 10).every((c) => c.tasks.length === 0));
+});
+
+test("dayColumns: a busy day keeps every task, soonest first", () => {
+  const ids = ["c", "a", "b"];
+  const hours = [17, 9, 13];
+  const cols = dayColumns(ids.map((id, i) => at(id, local(16, hours[i]))), NOON_15);
+  assert.deepEqual(cols[1].tasks.map((t) => t.id), ["a", "b", "c"]);
+});
+
+test("dayColumns: earlier today but already past is overdue, not today", () => {
+  const cols = dayColumns([at("morning", local(15, 9))], NOON_15);
+  assert.equal(cols[0].kind, "overdue");
+  assert.deepEqual(cols[0].tasks.map((t) => t.id), ["morning"]);
+});
+
+test("dayColumns: beyond a month goes to one Later column, nothing is dropped", () => {
+  const cols = dayColumns([at("soon", local(16)), at("next-year", new Date(2027, 0, 5).getTime())], NOON_15);
+  const last = cols[cols.length - 1];
+  assert.equal(last.kind, "later");
+  assert.deepEqual(last.tasks.map((t) => t.id), ["next-year"]);
+  assert.equal(cols.filter((c) => c.kind === "day").length, 7);
+});
+
+test("dayColumns: unreadable deadlines are left out", () => {
+  const cols = dayColumns([{ id: "x", title: "x", url: null, deadline: "nope" }], NOON_15);
+  assert.equal(cols.reduce((n, c) => n + c.tasks.length, 0), 0);
 });

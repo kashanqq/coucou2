@@ -21,6 +21,7 @@ Windows (`windows/`, see `windows/README.md`):
 - `src/` — island front end, TypeScript, no framework: `mochi/` (Mochi in Canvas 2D), `island/` (state machine, hooks, integrations), `views/`, `settings/`, `core/`, `upload/`.
 - `src-tauri/src/` — Rust backend: window, named pipe (`pipe.rs`), Claude API, pollers, secrets, hooks install.
 - `hook/` — `coucou-hook.exe`, the Claude Code relay (Cargo workspace member).
+- `bitrix-sync/` — the Bitrix24 sync service: a separate Python + Playwright process (see its README) that Coucou runs now and then; it writes `tasks.json`, which `src-tauri/src/bitrix.rs` reads. `bitrix_sync.rs` only starts it and reads its exit code + JSON status line — keep that contract (0 ok, 3 needs-login, 1 error).
 - `scripts/` — icon generator (`gen-icons.mjs`) and installer packaging (`pack.mjs`). `dev/` — browser-only previews, never shipped.
 
 ## Build
@@ -39,6 +40,7 @@ npm run dev         # front end only, in a browser
 npm run build       # tsc --noEmit + vite build
 npm test            # node --test on src/**/*.test.ts (Node 22.18+)
 cargo test          # Rust unit tests
+cd bitrix-sync; .\.venv\Scripts\python -m unittest   # sync service tests (setup.ps1 first)
 npm run pack        # installer into windows/release/
 npm run icons       # regenerate src-tauri/icons
 ```

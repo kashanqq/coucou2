@@ -113,7 +113,20 @@ export const Bridge = {
   // ── Bitrix24 ──────────────────────────────────────────────────────────────
   /** Re-reads tasks.json; the result arrives as a `bitrix` event. */
   bitrixRefresh: () => call<void>("bitrix_refresh"),
+  /** Runs the sync service once; resolves with how it ended. */
+  bitrixSyncNow: () => call<BitrixSyncStatus>("bitrix_sync_now"),
+  /** Opens a visible Edge window on the portal; resolves once signed in (and synced) or given up. */
+  bitrixLogin: () => call<BitrixSyncStatus>("bitrix_login"),
+  bitrixSyncStatus: () => call<BitrixSyncStatus>("bitrix_sync_status"),
 };
+
+export interface BitrixSyncStatus {
+  state: "ok" | "needs-login" | "error" | "running" | "not-installed" | "off" | "idle";
+  message: string | null;
+  count: number | null;
+  /** Unix ms. */
+  at: number | null;
+}
 
 /** One task from tasks.json: id, title, link and RFC 3339 deadline. */
 export type BitrixTask = DeadlineTask;

@@ -11,3 +11,7 @@ src-tauri/gen/schemas/
 .env
 .env.*
 !.env.example
+
+# Bitrix24 sync service: local virtualenv and bytecode
+bitrix-sync/.venv/
+__pycache__/

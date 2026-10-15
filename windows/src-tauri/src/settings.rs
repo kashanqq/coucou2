@@ -57,6 +57,10 @@ pub struct Settings {
     /// Local tasks.json with Bitrix24 deadlines, written by the user's own script. Empty = off.
     #[serde(default)]
     pub bitrix_tasks_path: String,
+    /// Bitrix24 portal (e.g. https://umschool.bitrix24.kz). Set = Coucou runs the
+    /// sync service now and then; empty = tasks.json comes from elsewhere, or not at all.
+    #[serde(default)]
+    pub bitrix_portal: String,
 }
 
 fn default_style() -> String {
@@ -133,6 +137,7 @@ impl Default for Settings {
             island_offset_y: default_offset_y(),
             island_style: default_style(),
             bitrix_tasks_path: String::new(),
+            bitrix_portal: String::new(),
         }
     }
 }

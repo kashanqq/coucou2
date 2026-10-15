@@ -46,7 +46,7 @@ installs for the current user only — no admin prompt.
 | Drag a file onto the island | Mochi turns into a box, swallows it, then offers to answer questions about it |
 | `Esc` | Closes the island |
 | Calendar tab (next to the chat) | Your week from Google Calendar, Join buttons for Meet links; the island opens 5 minutes before a meeting. Connect it in Settings → Google Calendar |
-| Bitrix24 tab (checklist icon) | Your Bitrix24 tasks from a local `tasks.json`: **Overdue**, **Needs attention** (deadline under 2 hours away) and **Upcoming**; click a task to open it. The tab gets an amber dot while something is overdue or close, and the island opens once per task when it gets under 2 hours. Point it at the file in Settings → Bitrix24 |
+| Bitrix24 tab (checklist icon) | Your Bitrix24 tasks from a local `tasks.json`, as a calendar strip: **Overdue** first, then one column per day from today (scroll sideways; a busy day scrolls down on its own), then **Later**. Deadlines under 2 hours away are marked amber; click a task to open it. The tab gets an amber dot while something is overdue or close, and the island opens once per task when it gets under 2 hours. Settings → Bitrix24: enter the portal and Sign in…, and Coucou keeps the file up to date with its sync service ([`bitrix-sync/`](bitrix-sync/README.md), run `setup.ps1` once) — or point it at a `tasks.json` of your own |
 | Settings → General → Look → *Thin bar* | A 15 px black bar stays on the top edge. Hover: it peeks. Click: it opens. Move the cursor away: it folds back into the bar. While folded, nothing opens it on its own — Claude Code, integrations and calendar reminders just write one line on the bar ("Needs permission · …", "Vercel · my-app", "In 5 min · Standup"…) |
 | Settings → General → *Dock to*, *Island position*, *Compact width*, *Wake delay*, *Expand on hover* | Dock the island to the top, left or right edge, align and offset it, set how fast it peeks, or open it on hover and close it when the cursor leaves |
 | Tray icon | Open, Settings…, Pause, Quit |
@@ -145,6 +145,7 @@ windows/
   src-tauri/           Rust backend: window, named pipe, chat providers, pollers,
                        Google Calendar, Credential Manager, hooks install
   hook/                coucou-hook.exe, the Claude Code relay
+  bitrix-sync/         Bitrix24 sync service (Python + Playwright), writes tasks.json
   scripts/             icon generator, installer packaging
   dev/                 browser-only previews, never shipped
 ```

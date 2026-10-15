@@ -1,31 +1,21 @@
-// Bitrix24 view — tasks from tasks.json in three groups: overdue, needing
-// attention (deadline under two hours away), and upcoming. Same frame as the
-// calendar: Mochi on the left, the list scrolling on the right.
+// Bitrix24 view — a calendar strip: one column per day, left to right, starting
+// with what is overdue. The strip scrolls sideways; a busy day scrolls on its
+// own, so the island never grows taller. Same frame as the calendar: Mochi on
+// the left, the strip on the right.
 
 import { h, svg, clear, dot } from "./dom";
 import { ICONS } from "./icons";
 import { Bridge, type BitrixTask } from "../core/bridge";
 import { State } from "../core/state";
 import { BITRIX_COLOR } from "../island/bitrix";
-import { deadlineMs, dueLabel, groupTasks } from "../core/deadlines";
+import { ATTENTION_MS, dayColumns, deadlineMs, dueLabel, type DayColumn } from "../core/deadlines";
 import type { ViewActions, ViewHost } from "./views";
 
 const DAY_MS = 86_400_000;
 
 const timeFmt = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
-const dateFmt = new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric", month: "short" });
-
-function startOfDay(ms: number): number {
-  const d = new Date(ms);
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-}
-
-/** "Today 18:00", "Tomorrow 9:00", "Tue 20 Oct 18:00". */
-function deadlineText(at: number, now: number): string {
-  const days = Math.round((startOfDay(at) - startOfDay(now)) / DAY_MS);
-  const day = days === 0 ? "Today" : days === 1 ? "Tomorrow" : days === -1 ? "Yesterday" : dateFmt.format(at);
-  return `${day} ${timeFmt.format(at)}`;
-}
+const weekdayFmt = new Intl.DateTimeFormat(undefined, { weekday: "short" });
+const dateFmt = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short" });
 
 function updatedAgo(ms: number): string {
   const m = Math.round(Math.max(0, Date.now() - ms) / 60_000);
@@ -35,7 +25,22 @@ function updatedAgo(ms: number): string {
   return hours < 48 ? `updated ${hours} h ago` : `updated ${Math.round(hours / 24)} d ago`;
 }
 
+/** [main label, small label] for a column header. */
+function columnLabel(col: DayColumn, today: number): [string, string] {
+  if (col.kind === "overdue") return ["Overdue", String(col.tasks.length)];
+  if (col.kind === "later") return ["Later", String(col.tasks.length)];
+  const day = col.day!;
+  const offset = Math.round((day - today) / DAY_MS);
+  const main = offset === 0 ? "Today" : offset === 1 ? "Tomorrow" : weekdayFmt.format(day);
+  return [main, dateFmt.format(day)];
+}
+
 type Kind = "late" | "soon" | "later";
+
+function kindOf(at: number, now: number): Kind {
+  if (at <= now) return "late";
+  return at - now < ATTENTION_MS ? "soon" : "later";
+}
 
 const BAR_COLOR: Record<Kind, string> = {
   late: "var(--red)",
@@ -43,21 +48,38 @@ const BAR_COLOR: Record<Kind, string> = {
   later: BITRIX_COLOR,
 };
 
-function taskRow(t: BitrixTask, kind: Kind, now: number, actions: ViewActions): HTMLElement {
+function taskCard(t: BitrixTask, col: DayColumn, now: number, actions: ViewActions): HTMLElement {
   const at = deadlineMs(t);
-  const row = h("div", {
-    class: `cal-row bx-row ${kind}`,
-    title: t.url ? "Click to open in Bitrix24" : t.title,
+  const kind = kindOf(at, now);
+  // Overdue and "later" columns aren't one day: their cards say which day.
+  const when = col.kind === "day" ? timeFmt.format(at) : `${dateFmt.format(at)}, ${timeFmt.format(at)}`;
+  const card = h("div", {
+    class: `bx-card ${kind}`,
+    title: t.url ? `${t.title}\nClick to open in Bitrix24` : t.title,
     onclick: () => { if (t.url) actions.openUrl(t.url); },
   },
-    h("i", { class: "cal-bar", style: `background:${BAR_COLOR[kind]}` }),
-    h("div", { class: "cal-time", text: deadlineText(at, now) }),
-    h("div", { class: "cal-info" }, h("div", { class: "cal-title", text: t.title })),
+    h("i", { class: "bx-card-bar", style: `background:${BAR_COLOR[kind]}` }),
+    h("div", { class: "bx-card-body" },
+      h("div", { class: "bx-card-time" },
+        h("span", { text: when }),
+        kind !== "later" ? h("span", { class: `cal-badge ${kind}`, text: dueLabel(at, now) }) : null,
+      ),
+      h("div", { class: "bx-card-title", text: t.title }),
+    ),
   );
-  if (kind !== "later") {
-    row.append(h("span", { class: `cal-badge ${kind}`, text: dueLabel(at, now) }));
-  }
-  return row;
+  return card;
+}
+
+function column(col: DayColumn, today: number, now: number, actions: ViewActions): HTMLElement {
+  const [main, small] = columnLabel(col, today);
+  const isToday = col.kind === "day" && col.day === today;
+  const body = h("div", { class: "bx-col-body" });
+  if (col.tasks.length === 0) body.append(h("div", { class: "bx-col-empty", text: "—" }));
+  for (const t of col.tasks) body.append(taskCard(t, col, now, actions));
+  return h("div", { class: `bx-col ${col.kind}${isToday ? " today" : ""}`, "data-key": `${col.kind}${col.day ?? ""}` },
+    h("div", { class: "bx-col-head" }, h("span", { class: "bx-col-name", text: main }), h("span", { text: small })),
+    body,
+  );
 }
 
 /** The portal a task link points at, for the "open Bitrix24" button. */
@@ -98,8 +120,23 @@ export function buildBitrix(actions: ViewActions): ViewHost {
     refresh,
     open,
   );
-  const list = h("div", { class: "cal-list" });
-  const body = h("div", { class: "cal-body" }, head, list);
+  const strip = h("div", { class: "bx-strip" });
+  // A mouse wheel has no sideways axis: over the strip it scrolls the days,
+  // unless the pointer is in a day that can still scroll down (or up) itself.
+  strip.addEventListener("wheel", (e) => {
+    if (e.deltaY === 0 || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+    const body = (e.target as Element).closest(".bx-col-body") as HTMLElement | null;
+    if (body) {
+      // Scaled displays leave fractional scroll positions: a pixel or two is "the end".
+      const room = e.deltaY > 0
+        ? body.scrollHeight - body.clientHeight - body.scrollTop > 2
+        : body.scrollTop > 2;
+      if (room) return;
+    }
+    strip.scrollLeft += e.deltaY;
+    e.preventDefault();
+  }, { passive: false });
+  const body = h("div", { class: "cal-body" }, head, strip);
   const el = h("div", { class: "view" }, h("div", { class: "card cal-card" }, body));
 
   let key = "";
@@ -119,40 +156,35 @@ export function buildBitrix(actions: ViewActions): ViewHost {
       portal = portalOf(bx.tasks);
       open.style.display = portal ? "" : "none";
       if (nextKey === key) return;
+      // Keep the reader where they were across the minute tick and re-syncs.
+      const keep = { left: strip.scrollLeft, tops: new Map<string, number>() };
+      for (const c of strip.querySelectorAll<HTMLElement>(".bx-col")) {
+        const scroller = c.querySelector<HTMLElement>(".bx-col-body");
+        if (scroller && c.dataset.key) keep.tops.set(c.dataset.key, scroller.scrollTop);
+      }
       key = nextKey;
-      clear(list);
+      clear(strip);
 
       if (!bx.configured) {
-        list.append(h("div", { class: "cal-empty" },
+        strip.append(h("div", { class: "cal-empty" },
           h("div", { class: "title", text: "No Bitrix24 task list yet." }),
-          h("div", { class: "sub", text: "Point Coucou at your tasks.json in Settings." }),
+          h("div", { class: "sub", text: "Enter your portal in Settings, or point Coucou at a tasks.json." }),
           h("div", { class: "actions" },
             h("button", { class: "btn primary", text: "Open Settings", onclick: () => actions.openSettingsWindow() }),
           ),
         ));
         return;
       }
-      if (bx.error) list.append(h("div", { class: "detail cal-error", text: bx.error }));
+      if (bx.error) strip.append(h("div", { class: "detail cal-error bx-error", text: bx.error }));
 
-      const groups = groupTasks(bx.tasks, now);
-      const sections: [string, Kind, BitrixTask[]][] = [
-        ["Overdue", "late", groups.overdue],
-        ["Needs attention", "soon", groups.attention],
-        ["Upcoming", "later", groups.upcoming],
-      ];
-      if (sections.every(([, , tasks]) => tasks.length === 0)) {
-        if (!bx.error) {
-          list.append(h("div", { class: "cal-empty" },
-            h("div", { class: "title", text: "No open tasks with a deadline." }),
-          ));
-        }
-        return;
+      const today = new Date(new Date(now).setHours(0, 0, 0, 0)).getTime();
+      for (const col of dayColumns(bx.tasks, now)) {
+        const el = column(col, today, now, actions);
+        strip.append(el);
+        const top = keep.tops.get(el.dataset.key!);
+        if (top) el.querySelector<HTMLElement>(".bx-col-body")!.scrollTop = top;
       }
-      for (const [label, kind, tasks] of sections) {
-        if (tasks.length === 0) continue;
-        list.append(h("div", { class: `cal-day bx-group ${kind}`, text: `${label} · ${tasks.length}` }));
-        for (const t of tasks) list.append(taskRow(t, kind, now, actions));
-      }
+      strip.scrollLeft = keep.left;
     },
   };
 }

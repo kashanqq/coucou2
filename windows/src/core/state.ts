@@ -117,6 +117,8 @@ export interface Settings {
   islandStyle: "island" | "bar";
   /** Local tasks.json with Bitrix24 deadlines. Empty = no Bitrix tab content. */
   bitrixTasksPath: string;
+  /** Bitrix24 portal; set = Coucou runs the sync service (windows/bitrix-sync). */
+  bitrixPortal: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -144,6 +146,7 @@ export const DEFAULT_SETTINGS: Settings = {
   islandOffsetY: 160,
   islandStyle: "island",
   bitrixTasksPath: "",
+  bitrixPortal: "",
 };
 
 type Listener = () => void;

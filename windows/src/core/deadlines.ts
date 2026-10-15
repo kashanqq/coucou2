@@ -43,6 +43,47 @@ export function groupTasks(tasks: DeadlineTask[], now: number): TaskGroups {
   return groups;
 }
 
+export interface DayColumn {
+  /** "overdue" before today, a calendar "day", or "later" past the last day shown. */
+  kind: "overdue" | "day" | "later";
+  /** Local midnight of the day, Unix ms; null for "overdue" and "later". */
+  day: number | null;
+  /** Soonest first (overdue: most recently missed first). */
+  tasks: DeadlineTask[];
+}
+
+function localMidnight(ms: number, plusDays = 0): number {
+  const d = new Date(ms);
+  // Built from the calendar date, so a DST change can't shift the boundary.
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + plusDays).getTime();
+}
+
+/**
+ * The calendar strip: overdue first, then every day from today — empty ones
+ * too — up to the last deadline (at least `minDays`, at most `maxDays`), then
+ * one "later" column so nothing further out is ever dropped.
+ */
+export function dayColumns(tasks: DeadlineTask[], now: number, minDays = 7, maxDays = 31): DayColumn[] {
+  const { overdue, attention, upcoming } = groupTasks(tasks, now);
+  const today = localMidnight(now);
+  const end = localMidnight(now, maxDays);
+  const future = [...attention, ...upcoming];
+
+  const inRange = future.filter((t) => deadlineMs(t) < end);
+  const lastDay = inRange.reduce((last, t) => Math.max(last, localMidnight(deadlineMs(t))), today);
+  const columns: DayColumn[] = [];
+  if (overdue.length > 0) columns.push({ kind: "overdue", day: null, tasks: overdue });
+  for (let i = 0; i < maxDays; i++) {
+    const day = localMidnight(now, i);
+    if (i >= minDays && day > lastDay) break;
+    const next = localMidnight(now, i + 1);
+    columns.push({ kind: "day", day, tasks: inRange.filter((t) => deadlineMs(t) >= day && deadlineMs(t) < next) });
+  }
+  const later = future.filter((t) => deadlineMs(t) >= end);
+  if (later.length > 0) columns.push({ kind: "later", day: null, tasks: later });
+  return columns;
+}
+
 /** Anything overdue or under ATTENTION_MS away — the tab's amber dot. */
 export function needsAttention(tasks: DeadlineTask[], now: number): boolean {
   const g = groupTasks(tasks, now);

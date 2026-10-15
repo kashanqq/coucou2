@@ -1,6 +1,7 @@
 // Coucou for Windows — app wiring and the commands the island calls.
 
 mod bitrix;
+mod bitrix_sync;
 mod calendar;
 mod claude;
 mod files;
@@ -63,7 +64,7 @@ fn boot(app: AppHandle, shared: State<Shared>) -> BootInfo {
 
 #[tauri::command]
 fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
-    let (screen_changed, autostart_changed, bitrix_changed) = {
+    let (screen_changed, autostart_changed, bitrix_changed, portal_changed) = {
         let mut current = shared.settings.lock().unwrap();
         let screen_changed = current.screen != settings.screen
             || current.island_align != settings.island_align
@@ -72,15 +73,23 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
             || current.island_offset_y != settings.island_offset_y
             || current.island_style != settings.island_style;
         let autostart_changed = current.autostart != settings.autostart;
-        let bitrix_changed = current.bitrix_tasks_path != settings.bitrix_tasks_path;
+        let portal_changed = current.bitrix_portal != settings.bitrix_portal;
+        let bitrix_changed = current.bitrix_tasks_path != settings.bitrix_tasks_path || portal_changed;
         *current = settings.clone();
-        (screen_changed, autostart_changed, bitrix_changed)
+        (screen_changed, autostart_changed, bitrix_changed, portal_changed)
     };
     if let Err(err) = settings::save(&settings) {
         eprintln!("[coucou] could not save settings: {err}");
     }
     if bitrix_changed {
         bitrix::check(&app, true);
+    }
+    if portal_changed && !settings.bitrix_portal.trim().is_empty() {
+        // A new portal: try right away, so Settings can say whether sign-in is needed.
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            bitrix_sync::run(&app, false).await;
+        });
     }
     if autostart_changed {
         let manager = app.autolaunch();
@@ -356,6 +365,27 @@ fn bitrix_refresh(app: AppHandle) {
     bitrix::check(&app, true);
 }
 
+/// "Sync now" — runs the sync service once; progress arrives as `bitrix-sync` events.
+#[tauri::command]
+async fn bitrix_sync_now(app: AppHandle) -> bitrix_sync::SyncStatus {
+    bitrix_sync::run(&app, false).await
+}
+
+/// Only ever called from the Sign in button: opens a visible Edge window on the portal.
+#[tauri::command]
+async fn bitrix_login(app: AppHandle) -> bitrix_sync::SyncStatus {
+    let status = bitrix_sync::run(&app, true).await;
+    if status.state == "ok" {
+        return bitrix_sync::run(&app, false).await;
+    }
+    status
+}
+
+#[tauri::command]
+fn bitrix_sync_status(app: AppHandle) -> bitrix_sync::SyncStatus {
+    bitrix_sync::last_status(&app)
+}
+
 /// Opens the configured n8n instance — the URL lives in the Credential Manager.
 #[tauri::command]
 fn open_n8n() {
@@ -490,6 +520,9 @@ pub fn run() {
             calendar_refresh,
             calendar_status,
             bitrix_refresh,
+            bitrix_sync_now,
+            bitrix_login,
+            bitrix_sync_status,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -512,6 +545,7 @@ pub fn run() {
             integrations::start(handle.clone());
             calendar::start(handle.clone());
             bitrix::start(handle.clone());
+            bitrix_sync::start(handle.clone());
             Ok(())
         })
         .run(tauri::generate_context!())

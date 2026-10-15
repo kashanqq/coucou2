@@ -127,11 +127,20 @@ fn is_date_time_with_zone(s: &str) -> bool {
     }
 }
 
-/// The path from Settings, without the quotes Explorer's "Copy as path" adds.
-fn configured_path(app: &AppHandle) -> String {
+/// Where tasks.json lives: the path from Settings (without the quotes Explorer's
+/// "Copy as path" adds), or — when only a portal is set — the file Coucou's own
+/// sync service writes. Empty when there is neither.
+pub fn tasks_path(app: &AppHandle) -> String {
     let shared = app.state::<crate::Shared>();
-    let raw = shared.settings.lock().unwrap().bitrix_tasks_path.clone();
-    raw.trim().trim_matches('"').trim().to_string()
+    let settings = shared.settings.lock().unwrap();
+    let raw = settings.bitrix_tasks_path.trim().trim_matches('"').trim();
+    if !raw.is_empty() {
+        return raw.to_string();
+    }
+    if settings.bitrix_portal.trim().is_empty() {
+        return String::new();
+    }
+    crate::settings::local_dir().join("bitrix").join("tasks.json").to_string_lossy().into_owned()
 }
 
 fn emit(app: &AppHandle, update: BitrixUpdate) {
@@ -156,7 +165,7 @@ pub fn start(app: AppHandle) {
 /// Sends the current list. `force` re-sends even when nothing changed — the
 /// island asks for it at launch and the refresh button uses it.
 pub fn check(app: &AppHandle, force: bool) {
-    let path = configured_path(app);
+    let path = tasks_path(app);
     if path.is_empty() {
         if remember((String::new(), 0, 0), force) {
             emit(app, BitrixUpdate { configured: false, tasks: Some(vec![]), error: None, synced_at: None });
