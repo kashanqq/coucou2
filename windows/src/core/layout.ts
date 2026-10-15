@@ -71,14 +71,14 @@ export const layoutPrefs: {
   gap: number;
   compactW: number;
   dock: "top" | "left" | "right";
-  /** "Thin bar" look: a 15 px black bar stays on the top edge instead of vanishing. */
+  /** "Thin bar" look: an 11 px black bar stays on the top edge instead of vanishing. */
   bar: boolean;
   /** Width the bar needs for its Claude Code status line; 0 when there is none. */
   barStatusW: number;
 } = { gap: 8, compactW: 200, dock: "top", bar: false, barStatusW: 0 };
 
 /** Height of the thin bar, and how wide it gets (as wide as the compact island). */
-export const BAR_H = 15;
+export const BAR_H = 11;
 export const BAR_MAX_W = 240;
 /** With a status line the bar grows to fit it, up to this (mirrors BAR_WIN_MAX_W). */
 export const BAR_STATUS_MAX_W = 420;
@@ -105,6 +105,14 @@ export function islandX(w: number): number {
 function windowWidth(): number {
   return document.documentElement.clientWidth || PANEL_W;
 }
+
+/**
+ * CSS `left` of the island. The bar is centred relative to the window, not placed by
+ * a pixel offset: the window shrinks to the bar a moment before the layout catches
+ * up, and a stale offset would throw the bar sideways for a frame.
+ */
+export const islandLeftCss = (w: number): string =>
+  layoutPrefs.bar && !isSideDock() ? `calc(50% - ${w / 2}px)` : `${islandX(w)}px`;
 
 /** Top edge of the island inside the window. */
 export function islandY(): number {

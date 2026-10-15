@@ -6,7 +6,7 @@ import { Bridge, IS_TAURI, onDragDrop } from "../core/bridge";
 import {
   EXPANDED_CORNER, EXPANDED_W, NOTCH_W, PANEL_H, PANEL_W,
   ROUNDED_CORNER, VIEW_LAYOUTS, botGlowColor, botGlowOpacity, botPosition, chatPromptHeight,
-  BAR_H, BAR_STATUS_MAX_W, SIDE_PANEL_H, SIDE_PANEL_W, barWidth, islandSize, islandX, islandY, isSideDock, layoutPrefs,
+  BAR_H, BAR_STATUS_MAX_W, SIDE_PANEL_H, SIDE_PANEL_W, barWidth, islandLeftCss, islandSize, islandX, islandY, isSideDock, layoutPrefs,
   type IslandMode, type IslandViewName,
 } from "../core/layout";
 import { Sound } from "../core/sound";
@@ -21,8 +21,28 @@ import { h } from "../views/dom";
 import { IslandStateMachine } from "./fsm";
 
 const BOT_OVERHANG = 40;
+/** Least time the cursor must rest on the thin bar before it opens. */
+const BAR_WAKE_MS = 700;
 /** Same margin as the Rust hit test (src-tauri/src/island.rs). */
 const HIT_MARGIN = 14;
+
+/**
+ * Thin-bar look: the folded bar has slanted, "cut" sides — wider at the screen
+ * edge, narrower at the bottom — with slightly rounded lower corners. The cut
+ * fades out as the bar grows into the panel, so the panel keeps its own shape.
+ */
+function barClipPath(w: number, h: number): string {
+  const t = clamp((2 * BAR_H - h) / BAR_H, 0, 1);
+  if (t <= 0) return "";
+  const s = 5 * t;
+  const k = 2.5 * t;
+  const len = Math.hypot(s, h);
+  const ux = s / len;
+  const uy = h / len;
+  const f = (n: number) => n.toFixed(2);
+  return `path('M0 0H${f(w)}L${f(w - s + ux * k)}${f(h - uy * k)}Q${f(w - s)} ${f(h)} ${f(w - s - k)} ${f(h)}`
+    + `H${f(s + k)}Q${f(s)} ${f(h)} ${f(s - ux * k)} ${f(h - uy * k)}Z')`;
+}
 
 /** The three views the drop sequence owns; leaving them stops the engine. */
 const UPLOAD_VIEWS: ReadonlySet<IslandViewName> = new Set(["upload", "uploading", "choose"]);
@@ -48,7 +68,8 @@ export class Island {
   private wakeStrip!: HTMLElement;
   private barStatus!: HTMLElement;
   private barStatusKey = "";
-  private barShrinkTimer: number | null = null;
+  /** Bar width last sent to Rust for the window region. */
+  private pushedBarW = -1;
 
   private header!: ViewHost;
   private views!: Map<IslandViewName, ViewHost>;
@@ -429,19 +450,8 @@ export class Island {
     const growing = want > layoutPrefs.barStatusW;
     layoutPrefs.barStatusW = want;
     this.wakeStrip.style.width = `${barWidth()}px`;
+    // The window region follows the bar as it animates (applyGeometry).
     if (State.mode === "hidden") this.animateGeometry(!growing);
-    // The window is the bar: widen it before the bar grows, narrow it once the
-    // bar has finished shrinking.
-    if (this.barShrinkTimer != null) window.clearTimeout(this.barShrinkTimer);
-    this.barShrinkTimer = null;
-    if (growing) {
-      void Bridge.setBarWidth(barWidth());
-    } else {
-      this.barShrinkTimer = window.setTimeout(() => {
-        this.barShrinkTimer = null;
-        void Bridge.setBarWidth(barWidth());
-      }, 450);
-    }
   }
 
   /** An alert stopped waiting for an answer: let the island auto-close again. */
@@ -590,7 +600,9 @@ export class Island {
     const gap = layoutPrefs.gap;
     const ix = islandX(w);
     const iy = islandY();
-    this.islandEl.style.left = `${ix}px`;
+    // Bar: centre in CSS, so the window shrinking to the bar can never leave the
+    // island a frame off-screen at its old offset.
+    this.islandEl.style.left = islandLeftCss(w);
     this.islandEl.style.top = `${iy}px`;
     // Floating (gap > 0) → fully rounded cloud; glued → square on the docked edge.
     const dock = layoutPrefs.dock;
@@ -600,6 +612,7 @@ export class Island {
       : dock === "right" ? `${r}px 0 0 ${r}px`
       : `0 0 ${r}px ${r}px`;
     this.islandEl.style.transform = "none";
+    this.islandEl.style.clipPath = layoutPrefs.bar && gap === 0 ? barClipPath(w, hh) : "";
     // These follow the island as it resizes, so they belong here rather than in
     // the state-driven DOM sync.
     if (isSideDock() && State.mode !== "expanded") {
@@ -612,12 +625,29 @@ export class Island {
     this.greetingCanvas.style.left = `${(w - EXPANDED_W) / 2}px`;
     this.uploadCanvas.el.style.left = `${(w - EXPANDED_W) / 2}px`;
 
+    this.pushBarWidth(w);
+
     const rect = { x: ix, y: iy, w, h: hh };
     const p = this.pushedRect;
     if (Math.abs(p.y - rect.y) > 0.5 || Math.abs(p.x - rect.x) > 0.5 || Math.abs(p.w - rect.w) > 0.5 || Math.abs(p.h - rect.h) > 0.5) {
       this.pushedRect = rect;
       void Bridge.setIslandRect(rect.x, rect.y, rect.w, rect.h);
     }
+  }
+
+  /**
+   * Thin bar: the folded window is cut to the bar's shape, and any pixel inside
+   * that cut the bar doesn't paint shows up white. So the cut tracks the width
+   * actually drawn, frame by frame, never ahead of it: while growing it trails
+   * the bar, while shrinking it runs a little ahead to cover the IPC round trip.
+   */
+  private pushBarWidth(w: number) {
+    if (!layoutPrefs.bar || State.mode !== "hidden") return;
+    const target = this.width.target;
+    const want = Math.floor(target < w ? Math.max(target, w - 16) : w);
+    if (want === this.pushedBarW) return;
+    this.pushedBarW = want;
+    void Bridge.setBarWidth(want);
   }
 
   /** Island rect in window coordinates (origin top-left of the 720×320 window). */
@@ -665,8 +695,11 @@ export class Island {
       Sound.resume();
       if (State.mode !== "hidden") return;
       cancelWake();
-      // The bar is already on screen: touching it answers at once.
-      const delay = layoutPrefs.bar ? 0 : Math.max(0, State.settings.wakeDelay ?? 0);
+      // The bar sits on screen all the time, so it is brushed by accident far more
+      // often than the invisible strip: it waits at least BAR_WAKE_MS. A click
+      // still opens it at once.
+      const wake = Math.max(0, State.settings.wakeDelay ?? 0);
+      const delay = layoutPrefs.bar ? Math.max(wake, BAR_WAKE_MS) : wake;
       if (delay === 0) {
         this.fsm.mouseEntered();
         return;

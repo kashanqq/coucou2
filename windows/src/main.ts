@@ -54,6 +54,11 @@ async function main() {
 
   await onEvent<null>("screen-changed", () => void Bridge.reposition());
 
+  // A full-screen app is up: slide off the edge, and back when it ends.
+  await onEvent<boolean>("fullscreen", (away) => {
+    document.getElementById("root")?.classList.toggle("away", away);
+  });
+
   // The settings window writes preferences; apply them here without a restart.
   await onEvent<Settings>("settings-changed", (s) => {
     State.settings = { ...State.settings, ...s };

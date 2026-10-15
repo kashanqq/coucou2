@@ -50,6 +50,13 @@ body {
 #root {
   position: fixed;
   inset: 0;
+  transition: transform 0.4s cubic-bezier(0.32, 0.72, 0, 1), opacity 0.3s ease-out;
+}
+
+/* A full-screen app is running: the island slides up off the screen edge. */
+#root.away {
+  transform: translateY(-120%);
+  opacity: 0;
 }
 
 /* Invisible strip that wakes the island when it is hidden. */
@@ -78,8 +85,8 @@ body {
   justify-content: center;
   gap: 6px;
   padding: 0 12px;
-  font: 500 10px var(--font);
-  line-height: 15px;
+  font: 500 9px var(--font);
+  line-height: 11px;
   color: var(--dim);
   white-space: nowrap;
   pointer-events: none;
@@ -89,7 +96,10 @@ body {
 
 #bar-status.on {
   opacity: 1;
-  transition-delay: 0.12s;
+  /* Wait for the island to finish folding and for the window to settle on the
+     bar (island.ts waits 420 ms before shrinking it); text shown earlier gets
+     clipped by the narrowing bar and blinks. */
+  transition-delay: 0.55s;
 }
 
 #bar-status i {
@@ -1657,7 +1667,7 @@ html[data-side] .cal-row { flex-wrap: wrap; row-gap: 0; }
 }
 
 .int-badge {
-  font: 500 10px var(--font);
+  font: 500 9px var(--font);
   padding: 2px 6px;
   border-radius: 999px;
   margin-left: auto;
